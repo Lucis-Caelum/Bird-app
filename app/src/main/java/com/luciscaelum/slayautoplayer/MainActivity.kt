@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
@@ -20,7 +19,7 @@ class MainActivity : Activity() {
             setPadding(28, 32, 28, 24)
         }
         root.addView(TextView(this).apply {
-            text = "SLAY AutoPlayer 0.1\n\nПервый тестовый APK: плавающая панель, управление и проверка захвата экрана. Автопилот пока выключен — сначала нужна калибровка под фактическую картинку игры."
+            text = "Bird Play 0.1\\n\\nПервый тестовый APK: плавающая панель и базовое управление. Автопилот пока выключен — сначала нужна калибровка под фактическую картинку игры."
             textSize = 18f
         })
         fun addButton(label: String, action: () -> Unit) {
