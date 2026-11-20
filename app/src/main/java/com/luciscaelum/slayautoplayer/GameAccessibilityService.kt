@@ -29,6 +29,9 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
     private var lastSceneSeenAt = 0L
+    private var previousObstacleX = -1
+    private var previousObstacleAt = 0L
+    private var previousVerticalVelocity = 0f
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
     private val eventScanTask = Runnable {
@@ -155,6 +158,9 @@ class GameAccessibilityService : AccessibilityService() {
             previousBirdY = -1
             previousBirdAt = 0L
             lastAutoTapAt = 0L
+            previousObstacleX = -1
+            previousObstacleAt = 0L
+            previousVerticalVelocity = 0f
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             previousBirdY = -1
@@ -351,62 +357,66 @@ class GameAccessibilityService : AccessibilityService() {
         if (!d.activeGame || d.birdX < 0 || d.birdY < 0) {
             previousBirdY = -1
             previousBirdAt = 0L
-            lastBirdX = -1
-            lastBirdY = -1
-            lastObstacleX = -1
-            lastGapTop = -1
-            lastGapBottom = -1
+            previousObstacleX = -1
+            previousObstacleAt = 0L
+            previousVerticalVelocity = 0f
             screenStatus = d.message
             return
         }
-        val velocity = if (previousBirdY >= 0 && previousBirdAt > 0L) {
-            (d.birdY - previousBirdY).toFloat() /
-                (now - previousBirdAt).coerceAtLeast(1L)
-        } else 0f
+
+        val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L) else 0L
+        val velocity = if (previousBirdY >= 0 && dt > 0L) (d.birdY - previousBirdY).toFloat() / dt else 0f
+        val acceleration = if (dt > 0L) ((velocity - previousVerticalVelocity) / dt).coerceIn(-0.012f, 0.012f) else 0f
         previousBirdY = d.birdY
         previousBirdAt = now
+        previousVerticalVelocity = velocity
 
         val sx = resources.displayMetrics.widthPixels.toFloat() / screenWidth.coerceAtLeast(1)
         val sy = resources.displayMetrics.heightPixels.toFloat() / screenHeight.coerceAtLeast(1)
-        val tapX = (screenWidth * 0.78f * sx)
-            .coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
-        val tapY = ((cropTop + (screenHeight - cropTop) * 0.52f) * sy)
-            .coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
+        val tapX = (screenWidth * 0.78f * sx).coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
+        val tapY = ((cropTop + (screenHeight - cropTop) * 0.52f) * sy).coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            // Height/velocity-gated stabilizer keeps the avatar airborne while pipe detection is unavailable.
-            val lowThreshold = (fieldHeight * 0.68f).toInt()
-            val falling = velocity > 0.008f
-            if (d.birdY >= lowThreshold && falling && now - lastAutoTapAt >= 320L) {
+            val lowThreshold = (fieldHeight * 0.58f).toInt()
+            if (d.birdY >= lowThreshold && velocity > 0.004f && now - lastAutoTapAt >= 230L) {
                 lastAutoTapAt = now
-                screenStatus = "СТАБИЛИЗАЦИЯ • касание при y=${d.birdY}"
+                screenStatus = "СТАБИЛИЗАЦИЯ • y=${d.birdY}"
                 tap(tapX, tapY)
             } else {
-                screenStatus = if (d.obstacleX >= 0) {
-                    "ТРУБА x=${d.obstacleX} • проход не подтверждён"
-                } else {
-                    "ПТИЦА y=${d.birdY} • ищу трубу • стабилизация ожидание"
-                }
+                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • просвет не подтверждён"
+                    else "ПТИЦА y=${d.birdY} • ищу следующую трубу"
             }
+            previousObstacleX = -1
+            previousObstacleAt = 0L
             return
         }
 
-        val gapCenter = (d.gapTop + d.gapBottom) / 2f
-        val gapHeight = (d.gapBottom - d.gapTop).toFloat()
-        val distance = d.obstacleX - d.birdX
-        val approaching = distance in
-            (fieldWidth * 0.035f).toInt()..(fieldWidth * 0.78f).toInt()
-        val predictedY = d.birdY + velocity * 135f
-        val tooLow = predictedY > gapCenter + gapHeight * 0.055f
-        val descending = velocity > 0.015f
+        val gapTop = d.gapTop.toFloat()
+        val gapBottom = d.gapBottom.toFloat()
+        val gapHeight = gapBottom - gapTop
+        val distance = (d.obstacleX - d.birdX).toFloat()
+        val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L) else 0L
+        val obstacleSpeed = if (previousObstacleX > d.obstacleX && obstacleDt > 0L)
+            (previousObstacleX - d.obstacleX).toFloat() / obstacleDt else 0f
+        previousObstacleX = d.obstacleX
+        previousObstacleAt = now
 
-        if (approaching && tooLow && descending && now - lastAutoTapAt >= 360L) {
+        val timeToPipe = if (obstacleSpeed > 0.05f) (distance / obstacleSpeed).coerceIn(90f, 1050f)
+            else (distance / (fieldWidth * 0.00075f)).coerceIn(180f, 900f)
+        val predictedY = d.birdY + velocity * timeToPipe + 0.5f * acceleration * timeToPipe * timeToPipe
+        val safeTop = gapTop + gapHeight * 0.28f
+        val safeBottom = gapBottom - gapHeight * 0.28f
+        val predictedTooLow = predictedY > safeBottom
+        val currentlyLowAndFalling = d.birdY > safeBottom && velocity > 0f
+        val approaching = distance in 0f..(fieldWidth * 0.88f)
+
+        if (approaching && (predictedTooLow || currentlyLowAndFalling) && now - lastAutoTapAt >= 210L) {
             lastAutoTapAt = now
-            screenStatus = "АВТОКЛИК • bird=${d.birdY} • gap=${d.gapTop}..${d.gapBottom}"
+            screenStatus = "АВТОКЛИК • y=${d.birdY} → прогноз ${predictedY.toInt()} • цель ${safeTop.toInt()}..${safeBottom.toInt()}"
             tap(tapX, tapY)
         } else {
-            screenStatus = "ПТИЦА y=${d.birdY} • ТРУБА x=${d.obstacleX} • ПРОХОД ${d.gapTop}..${d.gapBottom}"
+            screenStatus = "ПТИЦА y=${d.birdY} • ТРУБА x=${d.obstacleX} • G ${d.gapTop}..${d.gapBottom} • прогноз ${predictedY.toInt()}"
         }
     }
 
@@ -431,6 +441,9 @@ class GameAccessibilityService : AccessibilityService() {
         previousBirdY = -1
         previousBirdAt = 0L
         lastAutoTapAt = 0L
+        previousObstacleX = -1
+        previousObstacleAt = 0L
+        previousVerticalVelocity = 0f
         lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
