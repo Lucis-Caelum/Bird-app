@@ -49,7 +49,13 @@ jobs:
           cp /tmp/bird-play-release/Bird-Play.apk ./Bird-Play.apk
           git add Bird-Play.apk
           git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Publish Bird Play APK"
-          git push --force origin apk-download
+          for attempt in 1 2 3 4 5; do
+            if git push --force origin apk-download; then
+              break
+            fi
+            echo "Publish race detected; retrying ($attempt/5)..."
+            sleep 3
+          done
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
