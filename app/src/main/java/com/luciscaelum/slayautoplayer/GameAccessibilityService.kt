@@ -417,18 +417,18 @@ class GameAccessibilityService : AccessibilityService() {
         val error = predictedY - targetY
         val distanceWindow = distance in 0f..(fieldWidth * 1.35f)
         // Use a wider neutral band to avoid chasing tiny detector fluctuations.
-        val deadBand = gapHeight * 0.13f
+        val deadBand = gapHeight * 0.075f
 
         // One flap is a discrete impulse. Do not stack another flap while the previous
         // impulse is still lifting the avatar; re-evaluate only after its effect is visible.
         // In particular, a large position error must NOT bypass this recovery lock.
-        val recoveryLockMs = 340L
+        val recoveryLockMs = 175L
         val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < recoveryLockMs
-        val needsLift = error > deadBand && velocity > -0.075f
-        val tapCooldown = 340L
+        val needsLift = error > deadBand && (velocity > -0.13f || error > gapHeight * 0.20f)
+        val tapCooldown = 175L
         if (distanceWindow && needsLift && !stillRecoveringFromTap && now - lastAutoTapAt >= tapCooldown) {
             lastAutoTapAt = now
-            screenStatus = "ОДИНОЧНЫЙ ИМПУЛЬС • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
+            screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
             tap(tapX, tapY)
         } else {
             screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}" + if (stillRecoveringFromTap) " • жду эффект касания" else ""
