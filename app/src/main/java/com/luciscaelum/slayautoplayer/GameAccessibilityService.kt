@@ -293,7 +293,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAutoControl(
-        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int)
+        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
     ) {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
@@ -335,7 +335,7 @@ class GameAccessibilityService : AccessibilityService() {
         val gapHeight = (d.gapBottom - d.gapTop).toFloat()
         val distance = d.obstacleX - d.birdX
         val approaching = distance in
-            (fieldHeight * 0.035f).toInt()..(fieldHeight * 0.78f).toInt()
+            (fieldWidth * 0.035f).toInt()..(fieldWidth * 0.78f).toInt()
         val predictedY = d.birdY + velocity * 135f
         val tooLow = predictedY > gapCenter + gapHeight * 0.055f
         val descending = velocity > 0.015f
