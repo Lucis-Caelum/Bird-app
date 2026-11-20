@@ -5,6 +5,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+concurrency:
+  group: bird-play-apk
+  cancel-in-progress: true
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -34,6 +37,8 @@ jobs:
             git push --force origin apk-signing
             git checkout main
           fi
+          echo "Signing certificate fingerprint:"
+          keytool -list -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey | grep -E "SHA1:|SHA256:"
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
