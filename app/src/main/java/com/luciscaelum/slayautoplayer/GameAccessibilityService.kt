@@ -25,10 +25,11 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousBirdY = -1
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
+    private var lastSceneSeenAt = 0L
     private val monitorTask = object : Runnable {
         override fun run() {
             if (monitoring && !paused && !manual) captureScreenInternal()
-            if (monitoring) mainHandler.postDelayed(this, 220)
+            if (monitoring) mainHandler.postDelayed(this, 160)
         }
     }
 
@@ -75,11 +76,13 @@ class GameAccessibilityService : AccessibilityService() {
                     // Telegram status bar and Mini App header occupy the top ~11.7%.
                     // Keep the complete playfield below them for visual game analysis.
                     val top = (full.height * 0.117f).toInt().coerceIn(1, full.height - 1)
-                    val field = Bitmap.createBitmap(full, 0, top, full.width, full.height - top)
+                    val screenW = full.width
+                    val screenH = full.height
+                    val field = Bitmap.createBitmap(full, 0, top, screenW, screenH - top)
                     full.recycle()
 
                     val detection = detectPlayfield(field)
-                    handleAutoControl(detection, field.width, top, full.width, full.height)
+                    handleAutoControl(detection, field.width, top, screenW, screenH)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
                     lastBirdX = detection.birdX
@@ -107,140 +110,77 @@ class GameAccessibilityService : AccessibilityService() {
         }
     }
 
-    private data class Detection(val birdX: Int = -1, val birdY: Int = -1, val obstacleX: Int = -1, val gapTop: Int = -1, val gapBottom: Int = -1, val message: String)
-    // Conservative diagnostic detector: do not call menu artwork a bird.
-    // A scene is considered gameplay only when a paired pipe gap is visible.
+    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val message:String)
     private fun detectPlayfield(bitmap: Bitmap): Detection {
-        val w = bitmap.width
-        val h = bitmap.height
-        val step = 3
-        val purpleColumns = IntArray(w)
-        val blueColumns = IntArray(w)
-        val blueRows = IntArray(h)
-
-        for (y in 0 until h step step) {
-            for (x in 0 until w step step) {
-                val c = bitmap.getPixel(x, y)
-                val r = (c shr 16) and 255
-                val green = (c shr 8) and 255
-                val b = c and 255
-
-                // Rock/purple pipe body. Restrict to the right side of the playfield.
-                if (x > w * 0.52f && r in 55..190 && b in 55..190 &&
-                    green < 105 && r > green * 1.25 && b > green * 1.25) {
-                    purpleColumns[x]++
-                }
-
-                // Bird marker: blue jacket, but only in the expected left-side bird zone.
-                if (x in (w * 0.12f).toInt()..(w * 0.46f).toInt() &&
-                    y in (h * 0.20f).toInt()..(h * 0.82f).toInt() &&
-                    b > 42 && b > r * 1.20 && b > green * 1.05 && r < 115 && green < 145) {
-                    blueColumns[x]++
-                    blueRows[y]++
-                }
+        val w=bitmap.width; val h=bitmap.height; val step=3
+        val purple=IntArray(w)
+        var minBirdX=w; var maxBirdX=0; var minBirdY=h; var maxBirdY=0; var bluePixels=0
+        for(y in 0 until h step step) for(x in 0 until w step step) {
+            val c=bitmap.getPixel(x,y); val r=(c ushr 16) and 255; val gg=(c ushr 8) and 255; val bl=c and 255
+            if(x>w*0.10f && r in 48..190 && bl in 48..195 && gg<115 && r>gg*1.18 && bl>gg*1.18) purple[x]++
+            if(x in (w*0.08f).toInt()..(w*0.46f).toInt() && y in (h*0.16f).toInt()..(h*0.90f).toInt() && bl>55 && bl>r*1.18 && bl>gg*1.04 && r<145 && gg<170) {
+                minBirdX=min(minBirdX,x); maxBirdX=max(maxBirdX,x); minBirdY=min(minBirdY,y); maxBirdY=max(maxBirdY,y); bluePixels++
             }
         }
-
-        var obstacleX = -1
-        var maxCount = 0
-        for (x in (w * 0.52f).toInt() until (w * 0.99f).toInt() step step) {
-            if (purpleColumns[x] > maxCount) {
-                maxCount = purpleColumns[x]
-                obstacleX = x
+        val birdFound=bluePixels>=24 && maxBirdX-minBirdX>=12 && maxBirdY-minBirdY>=18
+        val birdX=if(birdFound)(minBirdX+maxBirdX)/2 else -1
+        val birdY=if(birdFound)(minBirdY+maxBirdY)/2 else -1
+        val searchFrom=if(birdFound)(birdX+w*0.08f).toInt().coerceAtMost(w-1) else (w*0.20f).toInt()
+        val threshold=(h*0.025f).toInt().coerceAtLeast(5)
+        val groups=mutableListOf<Pair<Int,Int>>(); var groupStart=-1
+        for(x in searchFrom until w) {
+            if(purple[x]>=threshold) { if(groupStart<0) groupStart=x }
+            else if(groupStart>=0) { if(x-groupStart>=w*0.018f) groups.add(groupStart to x); groupStart=-1 }
+        }
+        if(groupStart>=0 && w-groupStart>=w*0.018f) groups.add(groupStart to w)
+        if(groups.isEmpty()) return Detection(message=if(birdFound) "Птица найдена; жду приближения труб" else "Жду активную игру и препятствия")
+        val nearest=groups.first()
+        val pipeX=(nearest.first+nearest.second)/2
+        val sampleX=((nearest.first+nearest.second)/2).coerceIn(0,w-1)
+        val occupied=BooleanArray(h)
+        for(y in 0 until h step step) {
+            var n=0
+            for(x in max(0,sampleX-3)..min(w-1,sampleX+3)) {
+                val c=bitmap.getPixel(x,y); val r=(c ushr 16) and 255; val gg=(c ushr 8) and 255; val bl=c and 255
+                if(r in 48..190 && bl in 48..195 && gg<115 && r>gg*1.18 && bl>gg*1.18) n++
             }
+            occupied[y]=n>=2
         }
-
-        val occupancy = IntArray(h)
-        if (obstacleX >= 0 && maxCount >= 8) {
-            for (y in 0 until h step step) {
-                var count = 0
-                val left = max(0, obstacleX - step * 2)
-                val right = min(w, obstacleX + step * 3)
-                for (x in left until right step step) {
-                    val c = bitmap.getPixel(x, y)
-                    val r = (c shr 16) and 255
-                    val green = (c shr 8) and 255
-                    val b = c and 255
-                    if (r in 55..190 && b in 55..190 && green < 105 &&
-                        r > green * 1.25 && b > green * 1.25) count++
-                }
-                occupancy[y] = count
-            }
-        }
-
-        val runs = mutableListOf<Pair<Int, Int>>()
-        var runStart = -1
-        for (y in 0 until h step step) {
-            if (occupancy[y] >= 1) {
-                if (runStart < 0) runStart = y
-            } else if (runStart >= 0) {
-                if (y - runStart >= h * 0.045f) runs.add(runStart to y)
-                runStart = -1
-            }
-        }
-        if (runStart >= 0 && h - runStart >= h * 0.045f) runs.add(runStart to h)
-
-        var gapTop = -1
-        var gapBottom = -1
-        var largestGap = 0
-        for (i in 0 until runs.size - 1) {
-            val gap = runs[i + 1].first - runs[i].second
-            if (gap > largestGap) {
-                largestGap = gap
-                gapTop = runs[i].second
-                gapBottom = runs[i + 1].first
-            }
-        }
-
-        // Reject menu/character-selection screens: they may contain blue clothing,
-        // but they do not contain two pipe bodies separated by a plausible opening.
-        val validPipePair = runs.size >= 2 &&
-            largestGap in (h * 0.10f).toInt()..(h * 0.58f).toInt() &&
-            obstacleX > (w * 0.52f).toInt()
-        if (!validPipePair) {
-            return Detection(
-                message = if (obstacleX >= 0) "Меню/заставка или трубы не подтверждены — жду игру"
-                else "Жду игровую сцену: пара труб пока не найдена"
-            )
-        }
-
-        val xs = blueColumns.indices.filter { blueColumns[it] >= 3 }
-        val ys = blueRows.indices.filter { blueRows[it] >= 3 }
-        if (xs.isEmpty() || ys.isEmpty()) {
-            return Detection(obstacleX = obstacleX, gapTop = gapTop, gapBottom = gapBottom,
-                message = "Трубы и просвет найдены; ищу птицу")
-        }
-
-        val birdX = (xs.first() + xs.last()) / 2
-        val birdY = (ys.first() + ys.last()) / 2
-        return Detection(
-            birdX, birdY, obstacleX, gapTop, gapBottom,
-            "Игровая сцена: птица-кандидат x=$birdX y=$birdY • просвет $gapTop–$gapBottom"
-        )
+        val runs=mutableListOf<Pair<Int,Int>>(); var run=-1
+        for(y in 0 until h step step) { if(occupied[y]) { if(run<0) run=y } else if(run>=0) { if(y-run>=h*0.035f) runs.add(run to y); run=-1 } }
+        if(run>=0 && h-run>=h*0.035f) runs.add(run to h)
+        if(runs.size<2) return Detection(if(birdFound) birdX else -1,if(birdFound) birdY else -1,pipeX,message="Труба x=$pipeX найдена; ищу вторую часть и просвет")
+        var top=-1; var bottom=-1; var largest=0
+        for(i in 0 until runs.size-1) { val gap=runs[i+1].first-runs[i].second; if(gap>largest) { largest=gap; top=runs[i].second; bottom=runs[i+1].first } }
+        if(largest<h*0.08f || largest>h*0.62f) return Detection(message="Проверяю препятствие x=$pipeX; просвет пока не подтверждён")
+        if(!birdFound) return Detection(obstacleX=pipeX,gapTop=top,gapBottom=bottom,message="Трубы найдены x=$pipeX; ищу персонажа")
+        return Detection(birdX,birdY,pipeX,top,bottom,"ИГРА: птица y=$birdY • труба x=$pipeX • проход $top..$bottom")
     }
 
-    private fun handleAutoControl(d: Detection, fieldWidth: Int, cropTop: Int, screenWidth: Int, screenHeight: Int) {
-        if (!monitoring || paused || manual) return
-        val now = SystemClock.elapsedRealtime()
-        val active = d.birdX >= 0 && d.birdY >= 0 && d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
-        if (!active) { previousBirdY = -1; previousBirdAt = 0L; screenStatus = d.message; return }
-        val gapCenter = (d.gapTop + d.gapBottom) / 2f
-        val gapHeight = (d.gapBottom - d.gapTop).toFloat()
-        val velocity = if (previousBirdY >= 0 && previousBirdAt > 0L) (d.birdY - previousBirdY).toFloat() / (now - previousBirdAt).coerceAtLeast(1L) else 0f
-        previousBirdY = d.birdY
-        previousBirdAt = now
-        val predictedY = d.birdY + velocity * 130f
-        val targetY = gapCenter - gapHeight * 0.10f
-        if (predictedY > targetY + gapHeight * 0.12f && now - lastAutoTapAt >= 190L) {
-            val sx = resources.displayMetrics.widthPixels.toFloat() / screenWidth.coerceAtLeast(1)
-            val sy = resources.displayMetrics.heightPixels.toFloat() / screenHeight.coerceAtLeast(1)
-            val tx = (d.birdX * sx).coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
-            val ty = ((d.birdY + cropTop) * sy).coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
-            lastAutoTapAt = now
-            mainHandler.post { tap(tx, ty) }
-            screenStatus = "АВТОКЛИК • птица y=" + d.birdY + " • просвет " + d.gapTop + "–" + d.gapBottom
+    private fun handleAutoControl(d:Detection,fieldWidth:Int,cropTop:Int,screenWidth:Int,screenHeight:Int) {
+        if(!monitoring || paused || manual) return
+        val now=SystemClock.elapsedRealtime()
+        val valid=d.birdX>=0 && d.birdY>=0 && d.obstacleX>d.birdX && d.gapTop>=0 && d.gapBottom>d.gapTop
+        if(!valid) { previousBirdY=-1; previousBirdAt=0L; screenStatus=d.message; return }
+        lastSceneSeenAt=now
+        val center=(d.gapTop+d.gapBottom)/2f
+        val gap=(d.gapBottom-d.gapTop).toFloat()
+        val velocity=if(previousBirdY>=0 && previousBirdAt>0L) (d.birdY-previousBirdY).toFloat()/(now-previousBirdAt).coerceAtLeast(1L) else 0f
+        previousBirdY=d.birdY; previousBirdAt=now
+        val distance=d.obstacleX-d.birdX
+        val approach=distance in (fieldWidth*0.04f).toInt()..(fieldWidth*0.72f).toInt()
+        val predicted=d.birdY+velocity*115f
+        val target=center-gap*0.06f
+        if(approach && predicted>target+gap*0.08f && now-lastAutoTapAt>=250L) {
+            val sx=resources.displayMetrics.widthPixels.toFloat()/screenWidth.coerceAtLeast(1)
+            val sy=resources.displayMetrics.heightPixels.toFloat()/screenHeight.coerceAtLeast(1)
+            val tx=(d.birdX*sx).coerceIn(1f,resources.displayMetrics.widthPixels-1f)
+            val ty=((d.birdY+cropTop)*sy).coerceIn(1f,resources.displayMetrics.heightPixels-1f)
+            lastAutoTapAt=now
+            tap(tx,ty)
+            screenStatus="АВТОКЛИК • y=${d.birdY} • проход ${d.gapTop}..${d.gapBottom}"
         } else {
-            screenStatus = "ИГРА • птица y=" + d.birdY + " • труба x=" + d.obstacleX + " • просвет " + d.gapTop + "–" + d.gapBottom
+            screenStatus="ИГРА • птица y=${d.birdY} • труба x=${d.obstacleX} • проход ${d.gapTop}..${d.gapBottom}"
         }
     }
 
@@ -255,6 +195,7 @@ class GameAccessibilityService : AccessibilityService() {
         previousBirdY = -1
         previousBirdAt = 0L
         lastAutoTapAt = 0L
+        lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
         mainHandler.post(monitorTask)
