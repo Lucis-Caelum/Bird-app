@@ -5,7 +5,9 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
@@ -21,6 +23,13 @@ class OverlayService : Service() {
     private var panel: LinearLayout? = null
     private var status: TextView? = null
     private var windowParams: WindowManager.LayoutParams? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private val refreshTask = object : Runnable {
+        override fun run() {
+            refresh()
+            if (panel != null) handler.postDelayed(this, 700)
+        }
+    }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
@@ -50,9 +59,9 @@ class OverlayService : Service() {
         status = TextView(this).apply {
             text = "⠿  BIRD PLAY  •  READY\nСчёт: —\nАвтопилот: выключен"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 14f
+            textSize = 13f
             setPadding(dp(4), dp(4), dp(4), dp(10))
-            contentDescription = "Перетащи эту область, чтобы переместить панель"
+            contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
         }
         layout.addView(status)
 
@@ -72,6 +81,10 @@ class OverlayService : Service() {
             })
         }
 
+        button("СЧИТАТЬ ЭКРАН") {
+            GameAccessibilityService.requestScreenScan()
+            refresh()
+        }
         button("ПАУЗА / ПРОДОЛЖИТЬ") {
             GameAccessibilityService.togglePause()
             refresh()
@@ -98,7 +111,6 @@ class OverlayService : Service() {
         params.x = dp(12)
         params.y = dp(110)
 
-        // Drag the panel by holding the status/header area.
         status?.setOnTouchListener(object : View.OnTouchListener {
             private var downRawX = 0f
             private var downRawY = 0f
@@ -130,6 +142,7 @@ class OverlayService : Service() {
             wm.addView(layout, params)
             panel = layout
             windowParams = params
+            handler.post(refreshTask)
         } catch (e: Exception) {
             Toast.makeText(this, "Bird Play: не удалось показать панель — ${e.message}", Toast.LENGTH_LONG).show()
             stopSelf()
@@ -141,10 +154,13 @@ class OverlayService : Service() {
 
     private fun refresh() {
         val state = if (GameAccessibilityService.paused) "PAUSE" else "READY"
-        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт: —\nАвтопилот: выключен"
+        val text = GameAccessibilityService.lastOcrText
+        val preview = if (text.isBlank()) "" else "\\nТекст: ${text.take(55)}"
+        status?.text = "⠿  BIRD PLAY  •  $state\\nСчёт-кандидат: ${GameAccessibilityService.lastScoreCandidate}\\n${GameAccessibilityService.screenStatus}$preview\\nАвтопилот: выключен"
     }
 
     override fun onDestroy() {
+        handler.removeCallbacks(refreshTask)
         panel?.let {
             try { wm.removeView(it) } catch (_: Exception) {}
         }
