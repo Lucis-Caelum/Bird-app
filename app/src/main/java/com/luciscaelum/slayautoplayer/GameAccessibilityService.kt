@@ -375,10 +375,19 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            screenStatus = if (d.obstacleX >= 0) {
-                "ТРУБА ОБНАРУЖЕНА, НО ПРОХОД НЕ ПОДТВЕРЖДЁН • без слепого клика"
+            // Height/velocity-gated stabilizer keeps the avatar airborne while pipe detection is unavailable.
+            val lowThreshold = (fieldHeight * 0.68f).toInt()
+            val falling = velocity > 0.008f
+            if (d.birdY >= lowThreshold && falling && now - lastAutoTapAt >= 320L) {
+                lastAutoTapAt = now
+                screenStatus = "СТАБИЛИЗАЦИЯ • касание при y=${d.birdY}"
+                tap(tapX, tapY)
             } else {
-                "ПТИЦА y=${d.birdY} • жду распознавания трубы • без слепого клика"
+                screenStatus = if (d.obstacleX >= 0) {
+                    "ТРУБА x=${d.obstacleX} • проход не подтверждён"
+                } else {
+                    "ПТИЦА y=${d.birdY} • ищу трубу • стабилизация ожидание"
+                }
             }
             return
         }
@@ -418,6 +427,7 @@ class GameAccessibilityService : AccessibilityService() {
         lastObstacleX = -1
         lastGapTop = -1
         lastGapBottom = -1
+        lastTapStatus = "TAP —"
         previousBirdY = -1
         previousBirdAt = 0L
         lastAutoTapAt = 0L
@@ -451,16 +461,19 @@ class GameAccessibilityService : AccessibilityService() {
                 .build()
             val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
+                    lastTapStatus = "TAP OK"
                     screenStatus = "ANDROID: КАСАНИЕ ВЫПОЛНЕНО"
                     gestureInFlight.set(false)
                     done?.invoke()
                 }
                 override fun onCancelled(gestureDescription: GestureDescription?) {
+                    lastTapStatus = "TAP CANCEL"
                     screenStatus = "ANDROID: КАСАНИЕ ОТМЕНЕНО"
                     gestureInFlight.set(false)
                 }
             }, null)
             if (!accepted) {
+                lastTapStatus = "TAP REJECTED"
                 screenStatus = "ANDROID: ЖЕСТ НЕ ПРИНЯТ"
                 gestureInFlight.set(false)
             }
@@ -489,6 +502,7 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastObstacleX = -1
         @Volatile var lastGapTop = -1
         @Volatile var lastGapBottom = -1
+        @Volatile var lastTapStatus = "TAP —"
         @Volatile private var instance: GameAccessibilityService? = null
 
         fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
