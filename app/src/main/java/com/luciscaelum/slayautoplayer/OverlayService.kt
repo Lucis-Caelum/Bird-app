@@ -60,9 +60,9 @@ class OverlayService : Service() {
         status = TextView(this).apply {
             text = "⠿ BIRD PLAY\nИгровое поле: ожидание"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 11f
-            maxWidth = dp(168)
-            maxLines = 3
+            textSize = 9f
+            maxWidth = dp(142)
+            maxLines = 2
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
@@ -72,10 +72,10 @@ class OverlayService : Service() {
         fun button(label: String, action: () -> Unit) {
             val item = Button(this).apply {
                 text = label
-                textSize = 10f
+                textSize = 9f
                 isAllCaps = false
-                minHeight = dp(32)
-                minimumHeight = dp(32)
+                minHeight = dp(27)
+                minimumHeight = dp(27)
                 setPadding(dp(4), 0, dp(4), 0)
                 alpha = 0.82f
                 setOnClickListener { action() }
@@ -88,11 +88,7 @@ class OverlayService : Service() {
             })
         }
 
-        button("СНИМОК ПОЛЯ") {
-            GameAccessibilityService.requestScreenScan()
-            refresh()
-        }
-        button("МОНИТОРИНГ / ПАУЗА") {
+                button("МОНИТОРИНГ / ПАУЗА") {
             GameAccessibilityService.togglePause()
             refresh()
         }
@@ -110,7 +106,7 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            dp(184),
+            dp(156),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
