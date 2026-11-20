@@ -380,14 +380,22 @@ class GameAccessibilityService : AccessibilityService() {
             ((rawVelocity - previousRawVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
         val gravity = (rawGravity * 0.25f + 0.0012f * 0.75f).coerceIn(0.00025f, 0.0028f)
 
-        // Learn the actual post-tap vertical speed from the next captured frame.
-        if (tapObservationPendingAt > 0L && now - tapObservationPendingAt >= 70L && dt > 0f) {
-            val observedFlapVelocity = (rawVelocity + gravity * dt * 0.5f).coerceIn(-2.5f, 0.8f)
+        // Learn the actual post-flap velocity. Screen Y grows downward, so gravity
+        // makes the measured interval-average velocity LESS negative: subtract half-step gravity.
+        if (tapObservationPendingAt > 0L && now - tapObservationPendingAt >= 65L && dt > 0f) {
+            val observedFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, 0.8f)
             if (observedFlapVelocity < -0.03f) {
-                estimatedFlapVelocity = (estimatedFlapVelocity * 0.35f + observedFlapVelocity * 0.65f)
+                estimatedFlapVelocity = (estimatedFlapVelocity * 0.20f + observedFlapVelocity * 0.80f)
                     .coerceIn(-2.5f, -0.08f)
             }
             tapObservationPendingAt = 0L
+        } else if (tapObservationPendingAt == 0L && previousBirdAt > 0L && dt in 45f..260f &&
+            rawVelocity < previousRawVerticalVelocity - 0.18f) {
+            // A sharp upward velocity change usually means the player tapped manually.
+            // Treat it as a flap too, so human assistance does not leave the physics model stale.
+            val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, -0.08f)
+            estimatedFlapVelocity = (estimatedFlapVelocity * 0.25f + manualFlapVelocity * 0.75f)
+                .coerceIn(-2.5f, -0.08f)
         }
         previousBirdY = d.birdY
         previousBirdAt = now
@@ -446,8 +454,11 @@ class GameAccessibilityService : AccessibilityService() {
         val predictedTooLow = noTapPrediction > safeBottom
         val tapImprovesPath = afterTapPrediction < noTapPrediction - safeMargin * 0.25f
         val tapWouldOvershootTop = afterTapPrediction < safeTop
+        // While the bird is already climbing strongly, let that impulse work.
+        // Only interrupt the ascent if the no-tap path is projected to miss below the opening.
+        val strongAscent = velocity < -0.16f && noTapPrediction <= gapBottom
         val shouldTap = distanceWindow && predictedTooLow && tapImprovesPath &&
-            (!tapWouldOvershootTop || noTapPrediction > gapBottom)
+            (!tapWouldOvershootTop || noTapPrediction > gapBottom) && !strongAscent
 
         if (shouldTap) {
             screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
