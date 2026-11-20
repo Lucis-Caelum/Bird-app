@@ -23,6 +23,11 @@ class GameAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanInFlight = AtomicBoolean(false)
     private val gestureInFlight = AtomicBoolean(false)
+    // Reuse detector memory between frames; avoid allocating a full pixel buffer and scan arrays every frame.
+    private var detectorPixels = IntArray(0)
+    private var detectorColumnCounts = IntArray(0)
+    private var detectorCandidateColumns = BooleanArray(0)
+    private var detectorVertical = BooleanArray(0)
     @Volatile private var nextScreenshotAllowedAt = 0L
     @Volatile private var screenshotIntervalMs = 650L
     private var previousBirdY = -1
@@ -156,7 +161,9 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+        val detectionStartedAt = SystemClock.elapsedRealtime()
         val detection = detectPlayfield(field)
+        lastDetectionMs = SystemClock.elapsedRealtime() - detectionStartedAt
         if (detection.activeGame && !wasActiveGame) {
             previousBirdY = -1
             previousBirdAt = 0L
@@ -186,12 +193,16 @@ class GameAccessibilityService : AccessibilityService() {
         lastObstacleX = detection.obstacleX
         lastGapTop = detection.gapTop
         lastGapBottom = detection.gapBottom
+        screenStatus = "$screenStatus • CV ${lastDetectionMs}мс"
     }
 
     private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String)
     private fun detectPlayfield(bitmap: Bitmap): Detection {
         val w = bitmap.width
         val h = bitmap.height
+        val pixelCount = w * h
+        if (detectorPixels.size < pixelCount) detectorPixels = IntArray(pixelCount)
+        bitmap.getPixels(detectorPixels, 0, w, 0, 0, w, h)
         val step = 3
         val sampleW = (w + step - 1) / step
         val sampleH = (h + step - 1) / step
@@ -203,7 +214,7 @@ class GameAccessibilityService : AccessibilityService() {
         val scoreX1 = (w * 0.27f).toInt()
         for (y in scoreY0 until scoreY1 step 2) {
             for (x in 0 until scoreX1 step 2) {
-                val c = bitmap.getPixel(x, y)
+                val c = detectorPixels[y * w + x]
                 val r = (c ushr 16) and 255
                 val gg = (c ushr 8) and 255
                 val bl = c and 255
@@ -221,7 +232,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (activeGame) {
             for (y in (h * 0.12f).toInt() until (h * 0.97f).toInt() step step) {
                 for (x in (w * 0.07f).toInt() until (w * 0.46f).toInt() step step) {
-                    val c = bitmap.getPixel(x, y)
+                    val c = detectorPixels[y * w + x]
                     val r = (c ushr 16) and 255
                     val gg = (c ushr 8) and 255
                     val bl = c and 255
@@ -243,13 +254,15 @@ class GameAccessibilityService : AccessibilityService() {
 
         // Pipe body color sampled from the user's recording: muted purple (not orange decoration).
         // Work on sampled-grid indices throughout, so skipped pixels never create fake gaps.
-        val columnCounts = IntArray(sampleW)
+        if (detectorColumnCounts.size < sampleW) detectorColumnCounts = IntArray(sampleW)
+        val columnCounts = detectorColumnCounts
+        columnCounts.fill(0, 0, sampleW)
         for (sy in 0 until sampleH) {
             val y = sy * step
             for (sx in 0 until sampleW) {
                 val x = sx * step
                 if (x < w * 0.12f) continue
-                val c = bitmap.getPixel(x, y)
+                val c = detectorPixels[y * w + x]
                 val r = (c ushr 16) and 255
                 val gg = (c ushr 8) and 255
                 val bl = c and 255
@@ -258,7 +271,9 @@ class GameAccessibilityService : AccessibilityService() {
             }
         }
         val columnThreshold = max(10, (sampleH * 0.12f).toInt())
-        val candidateColumns = BooleanArray(sampleW) { columnCounts[it] >= columnThreshold }
+        if (detectorCandidateColumns.size < sampleW) detectorCandidateColumns = BooleanArray(sampleW)
+        val candidateColumns = detectorCandidateColumns
+        for (i in 0 until sampleW) candidateColumns[i] = columnCounts[i] >= columnThreshold
         // Bridge a single missed sampled column; this is a grid operation, not raw-pixel adjacency.
         for (i in 1 until sampleW - 1) {
             if (!candidateColumns[i] && candidateColumns[i - 1] && candidateColumns[i + 1]) {
@@ -292,12 +307,14 @@ class GameAccessibilityService : AccessibilityService() {
 
         val pipeCenterX = (nearest.first + nearest.second) / 2
         val pipeLeadingEdgeX = nearest.first
-        val vertical = BooleanArray(sampleH)
+        if (detectorVertical.size < sampleH) detectorVertical = BooleanArray(sampleH)
+        val vertical = detectorVertical
+        vertical.fill(false, 0, sampleH)
         for (sy in 0 until sampleH) {
             val y = sy * step
             var count = 0
             for (x in max(0, pipeCenterX - 9)..min(w - 1, pipeCenterX + 9) step step) {
-                val c = bitmap.getPixel(x, y)
+                val c = detectorPixels[y * w + x]
                 val r = (c ushr 16) and 255
                 val gg = (c ushr 8) and 255
                 val bl = c and 255
@@ -569,6 +586,7 @@ class GameAccessibilityService : AccessibilityService() {
             private set
         @Volatile var screenStatus = "Служба не подключена"
         @Volatile var lastFrameWidth = 0
+        @Volatile var lastDetectionMs = 0L
         @Volatile var lastFrameHeight = 0
         @Volatile var lastBirdX = -1
         @Volatile var lastBirdY = -1
