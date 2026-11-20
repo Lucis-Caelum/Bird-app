@@ -492,7 +492,11 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastGapBottom = -1
         @Volatile private var instance: GameAccessibilityService? = null
 
-        fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {\n            instance?.processCapturedFrame(field, cropTop, screenW, screenH)\n        }\n\n        fun togglePause() {
+        fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+            instance?.processCapturedFrame(field, cropTop, screenW, screenH)
+        }
+
+        fun togglePause() {
             val service = instance ?: return
             if (monitoring) service.stopMonitoring("Пауза")
             else service.startMonitoringInternal()
