@@ -284,12 +284,13 @@ class GameAccessibilityService : AccessibilityService() {
             )
         }
 
-        val pipeX = (nearest.first + nearest.second) / 2
+        val pipeCenterX = (nearest.first + nearest.second) / 2
+        val pipeLeadingEdgeX = nearest.first
         val vertical = BooleanArray(sampleH)
         for (sy in 0 until sampleH) {
             val y = sy * step
             var count = 0
-            for (x in max(0, pipeX - 9)..min(w - 1, pipeX + 9) step step) {
+            for (x in max(0, pipeCenterX - 9)..min(w - 1, pipeCenterX + 9) step step) {
                 val c = bitmap.getPixel(x, y)
                 val r = (c ushr 16) and 255
                 val gg = (c ushr 8) and 255
@@ -316,9 +317,9 @@ class GameAccessibilityService : AccessibilityService() {
         }
         if (runs.size < 2) {
             return Detection(
-                birdX = birdX, birdY = birdY, obstacleX = pipeX,
+                birdX = birdX, birdY = birdY, obstacleX = pipeLeadingEdgeX,
                 activeGame = true,
-                message = "ТРУБА x=$pipeX • ищу верхнюю/нижнюю часть"
+                message = "ТРУБА x=$pipeLeadingEdgeX • ищу верхнюю/нижнюю часть"
             )
         }
         var gapTop = -1
@@ -336,7 +337,7 @@ class GameAccessibilityService : AccessibilityService() {
             return Detection(
                 birdX = birdX, birdY = birdY, obstacleX = pipeX,
                 activeGame = true,
-                message = "ТРУБА x=$pipeX • просвет не подтверждён"
+                message = "ТРУБА x=$pipeLeadingEdgeX • просвет не подтверждён"
             )
         }
         // The orange crystal tips protrude into the visual gap; shrink it for collision safety.
@@ -344,8 +345,8 @@ class GameAccessibilityService : AccessibilityService() {
         gapTop = (gapTop + safety).coerceAtMost(h - 1)
         gapBottom = (gapBottom - safety).coerceAtLeast(gapTop + 1)
         return Detection(
-            birdX, birdY, pipeX, gapTop, gapBottom, true,
-            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeX • ПРОХОД $gapTop..$gapBottom"
+            birdX, birdY, pipeLeadingEdgeX, gapTop, gapBottom, true,
+            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeLeadingEdgeX • ПРОХОД $gapTop..$gapBottom"
         )
     }
 
@@ -384,9 +385,9 @@ class GameAccessibilityService : AccessibilityService() {
         if (!hasGap) {
             // While a pipe is being acquired, use a cautious height guard rather than waiting
             // until the avatar is already at the bottom edge.
-            val guardY = fieldHeight * 0.54f
-            if (d.birdY > guardY && velocity > 0.015f && now - lastAutoTapAt >= 120L) {
-                screenStatus = "ПОДДЕРЖКА • y=${d.birdY} • v=${"%.2f".format(velocity)}"
+            val guardY = fieldHeight * 0.72f
+            if (d.birdY > guardY && velocity > 0.04f && now - lastAutoTapAt >= 280L) {
+                screenStatus = "АВАРИЙНАЯ ПОДДЕРЖКА • y=${d.birdY} • v=${"%.2f".format(velocity)}"
                 if (tap(tapX, tapY)) lastAutoTapAt = now
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
@@ -421,11 +422,11 @@ class GameAccessibilityService : AccessibilityService() {
         // One flap is a discrete impulse. Do not stack another flap while the previous
         // impulse is still lifting the avatar; re-evaluate only after its effect is visible.
         // In particular, a large position error must NOT bypass this recovery lock.
-        val tapCooldown = 120L
+        val tapCooldown = 260L
         val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < tapCooldown
-        // Re-check every incoming frame. Keep allowing a correction during ascent only
-        // when the predicted crossing remains substantially below the safe target.
-        val needsLift = error > deadBand && (velocity > -0.10f || error > gapHeight * 0.16f)
+        // A flap is only allowed while descending. Never stack taps during upward motion:
+        // wait for the next measured descent, then correct from the new trajectory.
+        val needsLift = error > deadBand && velocity > 0.012f
         if (distanceWindow && needsLift && !stillRecoveringFromTap) {
             screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
             if (tap(tapX, tapY)) lastAutoTapAt = now
