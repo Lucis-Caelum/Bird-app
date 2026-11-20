@@ -49,7 +49,7 @@ class OverlayService : Service() {
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(8), dp(7), dp(8), dp(7))
+            setPadding(dp(6), dp(5), dp(6), dp(5))
             background = GradientDrawable().apply {
                 setColor(0xB8222730.toInt())
                 cornerRadius = dp(16).toFloat()
@@ -60,9 +60,9 @@ class OverlayService : Service() {
         status = TextView(this).apply {
             text = "⠿ BIRD PLAY\nИгровое поле: ожидание"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 9f
-            maxWidth = dp(142)
-            maxLines = 2
+            textSize = 8f
+            maxWidth = dp(126)
+            maxLines = 3
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
@@ -106,7 +106,7 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            dp(148),
+            dp(132),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
