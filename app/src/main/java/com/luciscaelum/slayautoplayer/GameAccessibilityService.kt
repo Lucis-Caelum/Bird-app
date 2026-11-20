@@ -32,6 +32,9 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousObstacleX = -1
     private var previousObstacleAt = 0L
     private var previousVerticalVelocity = 0f
+    private var previousRawVerticalVelocity = 0f
+    private var estimatedFlapVelocity = -0.55f
+    private var tapObservationPendingAt = 0L
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
     private val eventScanTask = Runnable {
@@ -161,6 +164,9 @@ class GameAccessibilityService : AccessibilityService() {
             previousObstacleX = -1
             previousObstacleAt = 0L
             previousVerticalVelocity = 0f
+            previousRawVerticalVelocity = 0f
+            estimatedFlapVelocity = -0.55f
+            tapObservationPendingAt = 0L
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             previousBirdY = -1
@@ -368,13 +374,25 @@ class GameAccessibilityService : AccessibilityService() {
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
             (d.birdY - previousBirdY).toFloat() / dt else 0f
-        // Smooth frame-to-frame noise: positive is falling, negative is rising.
-        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.30f + rawVelocity * 0.70f else 0f
-        val rawGravity = if (dt > 0f) ((velocity - previousVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
-        val gravity = (rawGravity * 0.35f + 0.0012f * 0.65f).coerceIn(0.00025f, 0.0028f)
+        // Responsive velocity estimate; excessive smoothing makes the parabola lag after taps.
+        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.25f + rawVelocity * 0.75f else 0f
+        val rawGravity = if (dt > 0f && previousBirdAt > 0L)
+            ((rawVelocity - previousRawVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
+        val gravity = (rawGravity * 0.25f + 0.0012f * 0.75f).coerceIn(0.00025f, 0.0028f)
+
+        // Learn the actual post-tap vertical speed from the next captured frame.
+        if (tapObservationPendingAt > 0L && now - tapObservationPendingAt >= 70L && dt > 0f) {
+            val observedFlapVelocity = (rawVelocity + gravity * dt * 0.5f).coerceIn(-2.5f, 0.8f)
+            if (observedFlapVelocity < -0.03f) {
+                estimatedFlapVelocity = (estimatedFlapVelocity * 0.35f + observedFlapVelocity * 0.65f)
+                    .coerceIn(-2.5f, -0.08f)
+            }
+            tapObservationPendingAt = 0L
+        }
         previousBirdY = d.birdY
         previousBirdAt = now
         previousVerticalVelocity = velocity
+        previousRawVerticalVelocity = rawVelocity
 
         val sx = resources.displayMetrics.widthPixels.toFloat() / screenWidth.coerceAtLeast(1)
         val sy = resources.displayMetrics.heightPixels.toFloat() / screenHeight.coerceAtLeast(1)
@@ -383,12 +401,14 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            // While a pipe is being acquired, use a cautious height guard rather than waiting
-            // until the avatar is already at the bottom edge.
-            val guardY = fieldHeight * 0.72f
-            if (d.birdY > guardY && velocity > 0.04f && now - lastAutoTapAt >= 280L) {
-                screenStatus = "АВАРИЙНАЯ ПОДДЕРЖКА • y=${d.birdY} • v=${"%.2f".format(velocity)}"
-                if (tap(tapX, tapY)) lastAutoTapAt = now
+            // If pipe detection briefly drops out, keep a soft emergency guard.
+            val guardY = fieldHeight * 0.78f
+            if (d.birdY > guardY && velocity > 0.08f && now - lastAutoTapAt >= 120L) {
+                screenStatus = "АВАРИЙНАЯ КОРРЕКЦИЯ • y=${d.birdY} • v=${"%.2f".format(velocity)}"
+                if (tap(tapX, tapY)) {
+                    lastAutoTapAt = now
+                    tapObservationPendingAt = now
+                }
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
                     else "ПТИЦА y=${d.birdY} • поиск следующей трубы"
@@ -411,27 +431,37 @@ class GameAccessibilityService : AccessibilityService() {
         previousObstacleX = d.obstacleX
         previousObstacleAt = now
 
-        // Start correcting while the obstacle is still more than one screen-width away.
-        val timeToPipe = (distance / obstacleSpeed).coerceIn(80f, 850f)
-        val predictedY = d.birdY + velocity * timeToPipe + 0.5f * gravity * timeToPipe * timeToPipe
-        val error = predictedY - targetY
-        val distanceWindow = distance in 0f..(fieldWidth * 1.35f)
-        // Use a wider neutral band to avoid chasing tiny detector fluctuations.
-        val deadBand = gapHeight * 0.055f
+        val timeToPipe = (distance / obstacleSpeed).coerceIn(70f, 1000f)
+        val noTapPrediction = d.birdY + velocity * timeToPipe + 0.5f * gravity * timeToPipe * timeToPipe
+        // Compare the current ballistic arc with the arc after a fresh flap impulse.
+        val afterTapPrediction = d.birdY + estimatedFlapVelocity * timeToPipe +
+            0.5f * gravity * timeToPipe * timeToPipe
+        val safeMargin = (gapHeight * 0.12f).coerceAtLeast(fieldHeight * 0.012f)
+        val safeTop = gapTop + safeMargin
+        val safeBottom = gapBottom - safeMargin
+        val distanceWindow = distance in 0f..(fieldWidth * 1.5f)
 
-        // One flap is a discrete impulse. Do not stack another flap while the previous
-        // impulse is still lifting the avatar; re-evaluate only after its effect is visible.
-        // In particular, a large position error must NOT bypass this recovery lock.
-        val tapCooldown = 260L
-        val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < tapCooldown
-        // A flap is only allowed while descending. Never stack taps during upward motion:
-        // wait for the next measured descent, then correct from the new trajectory.
-        val needsLift = error > deadBand && velocity > 0.012f
-        if (distanceWindow && needsLift && !stillRecoveringFromTap) {
-            screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
-            if (tap(tapX, tapY)) lastAutoTapAt = now
+        // Select a flap only when the no-tap trajectory is too low and a tap improves it.
+        // There is no arbitrary cooldown: gestureInFlight prevents overlapping Android taps.
+        val predictedTooLow = noTapPrediction > safeBottom
+        val tapImprovesPath = afterTapPrediction < noTapPrediction - safeMargin * 0.25f
+        val tapWouldOvershootTop = afterTapPrediction < safeTop
+        val shouldTap = distanceWindow && predictedTooLow && tapImprovesPath &&
+            (!tapWouldOvershootTop || noTapPrediction > gapBottom)
+
+        if (shouldTap) {
+            screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
+            if (tap(tapX, tapY)) {
+                lastAutoTapAt = now
+                tapObservationPendingAt = now
+            }
         } else {
-            screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}" + if (stillRecoveringFromTap) " • жду эффект касания" else ""
+            val phase = when {
+                velocity < -0.02f -> "ПОДЪЁМ"
+                velocity > 0.02f -> "ПАДЕНИЕ"
+                else -> "ВЕРШИНА ДУГИ"
+            }
+            screenStatus = "$phase • птица y=${d.birdY} • цель ${targetY.toInt()} • прогноз ${noTapPrediction.toInt()} • тап дал бы ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom"
         }
     }
 
@@ -459,6 +489,9 @@ class GameAccessibilityService : AccessibilityService() {
         previousObstacleX = -1
         previousObstacleAt = 0L
         previousVerticalVelocity = 0f
+        previousRawVerticalVelocity = 0f
+        estimatedFlapVelocity = -0.55f
+        tapObservationPendingAt = 0L
         lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
