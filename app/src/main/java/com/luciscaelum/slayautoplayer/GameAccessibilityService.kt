@@ -89,7 +89,7 @@ class GameAccessibilityService : AccessibilityService() {
 
                     screenshotIntervalMs = 650L
                     val detection = detectPlayfield(field)
-                    handleAutoControl(detection, field.height, top, screenW, screenH)
+                    handleAutoControl(detection, field.width, field.height, top, screenW, screenH)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
                     lastBirdX = detection.birdX
@@ -293,7 +293,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAutoControl(
-        d: Detection, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
+        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int)
     ) {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
