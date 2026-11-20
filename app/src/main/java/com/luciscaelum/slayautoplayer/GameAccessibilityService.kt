@@ -110,51 +110,171 @@ class GameAccessibilityService : AccessibilityService() {
         }
     }
 
-    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val message:String)
+    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String)
     private fun detectPlayfield(bitmap: Bitmap): Detection {
-        val w=bitmap.width; val h=bitmap.height; val step=3
-        val purple=IntArray(w)
-        var minBirdX=w; var maxBirdX=0; var minBirdY=h; var maxBirdY=0; var bluePixels=0
-        for(y in 0 until h step step) for(x in 0 until w step step) {
-            val c=bitmap.getPixel(x,y); val r=(c ushr 16) and 255; val gg=(c ushr 8) and 255; val bl=c and 255
-            if(x>w*0.10f && r in 48..190 && bl in 48..195 && gg<115 && r>gg*1.18 && bl>gg*1.18) purple[x]++
-            if(x in (w*0.08f).toInt()..(w*0.46f).toInt() && y in (h*0.16f).toInt()..(h*0.90f).toInt() && bl>55 && bl>r*1.18 && bl>gg*1.04 && r<145 && gg<170) {
-                minBirdX=min(minBirdX,x); maxBirdX=max(maxBirdX,x); minBirdY=min(minBirdY,y); maxBirdY=max(maxBirdY,y); bluePixels++
+        val w = bitmap.width
+        val h = bitmap.height
+        val step = 3
+        val sampleW = (w + step - 1) / step
+        val sampleH = (h + step - 1) / step
+
+        // The score badge exists only during active gameplay; the menu hero is not the bird.
+        var scoreOrange = 0
+        val scoreY0 = (h * 0.08f).toInt()
+        val scoreY1 = (h * 0.24f).toInt()
+        val scoreX1 = (w * 0.27f).toInt()
+        for (y in scoreY0 until scoreY1 step 2) {
+            for (x in 0 until scoreX1 step 2) {
+                val c = bitmap.getPixel(x, y)
+                val r = (c ushr 16) and 255
+                val gg = (c ushr 8) and 255
+                val bl = c and 255
+                if (r > 165 && gg in 25..145 && bl < 85 && r > gg * 1.35) scoreOrange++
             }
         }
-        val birdFound=bluePixels>=24 && maxBirdX-minBirdX>=12 && maxBirdY-minBirdY>=18
-        val birdX=if(birdFound)(minBirdX+maxBirdX)/2 else -1
-        val birdY=if(birdFound)(minBirdY+maxBirdY)/2 else -1
-        val searchFrom=if(birdFound)(birdX+w*0.08f).toInt().coerceAtMost(w-1) else (w*0.20f).toInt()
-        val threshold=(h*0.025f).toInt().coerceAtLeast(5)
-        val groups=mutableListOf<Pair<Int,Int>>(); var groupStart=-1
-        for(x in searchFrom until w) {
-            if(purple[x]>=threshold) { if(groupStart<0) groupStart=x }
-            else if(groupStart>=0) { if(x-groupStart>=w*0.018f) groups.add(groupStart to x); groupStart=-1 }
-        }
-        if(groupStart>=0 && w-groupStart>=w*0.018f) groups.add(groupStart to w)
-        if(groups.isEmpty()) return Detection(if(birdFound) birdX else -1, if(birdFound) birdY else -1, message=if(birdFound) "ИГРА: персонаж y=$birdY • ожидаю появления труб" else "Жду активную игру и препятствия")
-        val nearest=groups.first()
-        val pipeX=(nearest.first+nearest.second)/2
-        val sampleX=((nearest.first+nearest.second)/2).coerceIn(0,w-1)
-        val occupied=BooleanArray(h)
-        for(y in 0 until h step step) {
-            var n=0
-            for(x in max(0,sampleX-3)..min(w-1,sampleX+3)) {
-                val c=bitmap.getPixel(x,y); val r=(c ushr 16) and 255; val gg=(c ushr 8) and 255; val bl=c and 255
-                if(r in 48..190 && bl in 48..195 && gg<115 && r>gg*1.18 && bl>gg*1.18) n++
+        val activeGame = scoreOrange > 90
+
+        // Avatar is the connected blue/dark-cyan sprite in the left half of the playfield.
+        var minBirdX = w
+        var maxBirdX = 0
+        var minBirdY = h
+        var maxBirdY = 0
+        var birdPixels = 0
+        if (activeGame) {
+            for (y in (h * 0.12f).toInt() until (h * 0.97f).toInt() step step) {
+                for (x in (w * 0.07f).toInt() until (w * 0.46f).toInt() step step) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c ushr 16) and 255
+                    val gg = (c ushr 8) and 255
+                    val bl = c and 255
+                    if (bl > 55 && bl > r * 1.18 && bl > gg * 1.04 && r < 145 && gg < 170) {
+                        minBirdX = min(minBirdX, x)
+                        maxBirdX = max(maxBirdX, x)
+                        minBirdY = min(minBirdY, y)
+                        maxBirdY = max(maxBirdY, y)
+                        birdPixels++
+                    }
+                }
             }
-            occupied[y]=n>=2
         }
-        val runs=mutableListOf<Pair<Int,Int>>(); var run=-1
-        for(y in 0 until h step step) { if(occupied[y]) { if(run<0) run=y } else if(run>=0) { if(y-run>=h*0.035f) runs.add(run to y); run=-1 } }
-        if(run>=0 && h-run>=h*0.035f) runs.add(run to h)
-        if(runs.size<2) return Detection(if(birdFound) birdX else -1,if(birdFound) birdY else -1,pipeX,message="Труба x=$pipeX найдена; ищу вторую часть и просвет")
-        var top=-1; var bottom=-1; var largest=0
-        for(i in 0 until runs.size-1) { val gap=runs[i+1].first-runs[i].second; if(gap>largest) { largest=gap; top=runs[i].second; bottom=runs[i+1].first } }
-        if(largest<h*0.08f || largest>h*0.62f) return Detection(message="Проверяю препятствие x=$pipeX; просвет пока не подтверждён")
-        if(!birdFound) return Detection(obstacleX=pipeX,gapTop=top,gapBottom=bottom,message="Трубы найдены x=$pipeX; ищу персонажа")
-        return Detection(birdX,birdY,pipeX,top,bottom,"ИГРА: птица y=$birdY • труба x=$pipeX • проход $top..$bottom")
+        val birdFound = activeGame && birdPixels >= 24 &&
+            maxBirdX - minBirdX >= 12 && maxBirdY - minBirdY >= 18
+        val birdX = if (birdFound) (minBirdX + maxBirdX) / 2 else -1
+        val birdY = if (birdFound) (minBirdY + maxBirdY) / 2 else -1
+        if (!activeGame) return Detection(message = "Меню / отсчёт • ожидаю игровое поле")
+
+        // Pipe body color sampled from the user's recording: muted purple (not orange decoration).
+        // Work on sampled-grid indices throughout, so skipped pixels never create fake gaps.
+        val columnCounts = IntArray(sampleW)
+        for (sy in 0 until sampleH) {
+            val y = sy * step
+            for (sx in 0 until sampleW) {
+                val x = sx * step
+                if (x < w * 0.12f) continue
+                val c = bitmap.getPixel(x, y)
+                val r = (c ushr 16) and 255
+                val gg = (c ushr 8) and 255
+                val bl = c and 255
+                if (r in 48..190 && bl in 48..195 && gg < 115 &&
+                    r > gg * 1.18 && bl > gg * 1.18) columnCounts[sx]++
+            }
+        }
+        val columnThreshold = max(10, (sampleH * 0.12f).toInt())
+        val candidateColumns = BooleanArray(sampleW) { columnCounts[it] >= columnThreshold }
+        // Bridge a single missed sampled column; this is a grid operation, not raw-pixel adjacency.
+        for (i in 1 until sampleW - 1) {
+            if (!candidateColumns[i] && candidateColumns[i - 1] && candidateColumns[i + 1]) {
+                candidateColumns[i] = true
+            }
+        }
+        val groups = mutableListOf<Pair<Int, Int>>()
+        var start = -1
+        for (i in 0 until sampleW) {
+            if (candidateColumns[i]) {
+                if (start < 0) start = i
+            } else if (start >= 0) {
+                if ((i - start) * step >= w * 0.035f) groups.add(start * step to i * step)
+                start = -1
+            }
+        }
+        if (start >= 0 && (sampleW - start) * step >= w * 0.035f) {
+            groups.add(start * step to w)
+        }
+        val nearest = groups.firstOrNull { group ->
+            val centerX = (group.first + group.second) / 2
+            !birdFound || centerX > birdX + w * 0.04f
+        }
+        if (nearest == null) {
+            return Detection(
+                birdX = birdX, birdY = birdY, activeGame = true,
+                message = if (birdFound) "ИГРА • персонаж x=$birdX y=$birdY • ожидаю трубы"
+                else "ИГРА • счёт распознан, ищу персонажа"
+            )
+        }
+
+        val pipeX = (nearest.first + nearest.second) / 2
+        val vertical = BooleanArray(sampleH)
+        for (sy in 0 until sampleH) {
+            val y = sy * step
+            var count = 0
+            for (x in max(0, pipeX - 9)..min(w - 1, pipeX + 9) step step) {
+                val c = bitmap.getPixel(x, y)
+                val r = (c ushr 16) and 255
+                val gg = (c ushr 8) and 255
+                val bl = c and 255
+                if (r in 48..190 && bl in 48..195 && gg < 115 &&
+                    r > gg * 1.18 && bl > gg * 1.18) count++
+            }
+            vertical[sy] = count >= 2
+        }
+        val runs = mutableListOf<Pair<Int, Int>>()
+        var runStart = -1
+        for (i in 0 until sampleH) {
+            if (vertical[i]) {
+                if (runStart < 0) runStart = i
+            } else if (runStart >= 0) {
+                if ((i - runStart) * step >= h * 0.045f) {
+                    runs.add(runStart * step to i * step)
+                }
+                runStart = -1
+            }
+        }
+        if (runStart >= 0 && (sampleH - runStart) * step >= h * 0.045f) {
+            runs.add(runStart * step to h)
+        }
+        if (runs.size < 2) {
+            return Detection(
+                birdX = birdX, birdY = birdY, obstacleX = pipeX,
+                activeGame = true,
+                message = "ТРУБА x=$pipeX • ищу верхнюю/нижнюю часть"
+            )
+        }
+        var gapTop = -1
+        var gapBottom = -1
+        var largestGap = 0
+        for (i in 0 until runs.size - 1) {
+            val gap = runs[i + 1].first - runs[i].second
+            if (gap > largestGap) {
+                largestGap = gap
+                gapTop = runs[i].second
+                gapBottom = runs[i + 1].first
+            }
+        }
+        if (largestGap < h * 0.08f || largestGap > h * 0.62f) {
+            return Detection(
+                birdX = birdX, birdY = birdY, obstacleX = pipeX,
+                activeGame = true,
+                message = "ТРУБА x=$pipeX • просвет не подтверждён"
+            )
+        }
+        // The orange crystal tips protrude into the visual gap; shrink it for collision safety.
+        val safety = (h * 0.025f).toInt()
+        gapTop = (gapTop + safety).coerceAtMost(h - 1)
+        gapBottom = (gapBottom - safety).coerceAtLeast(gapTop + 1)
+        return Detection(
+            birdX, birdY, pipeX, gapTop, gapBottom, true,
+            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeX • ПРОХОД $gapTop..$gapBottom"
+        )
     }
 
     private fun handleAutoControl(d:Detection,fieldWidth:Int,cropTop:Int,screenWidth:Int,screenHeight:Int) {
