@@ -269,7 +269,7 @@ class GameAccessibilityService : AccessibilityService() {
             )
         }
         // The orange crystal tips protrude into the visual gap; shrink it for collision safety.
-        val safety = (h * 0.025f).toInt()
+        val safety = (h * 0.045f).toInt()
         gapTop = (gapTop + safety).coerceAtMost(h - 1)
         gapBottom = (gapBottom - safety).coerceAtLeast(gapTop + 1)
         return Detection(
