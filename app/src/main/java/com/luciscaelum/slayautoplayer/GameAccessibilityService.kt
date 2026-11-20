@@ -23,6 +23,8 @@ class GameAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanInFlight = AtomicBoolean(false)
     private val gestureInFlight = AtomicBoolean(false)
+    @Volatile private var nextScreenshotAllowedAt = 0L
+    @Volatile private var screenshotIntervalMs = 650L
     private var previousBirdY = -1
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
@@ -30,7 +32,7 @@ class GameAccessibilityService : AccessibilityService() {
     private val monitorTask = object : Runnable {
         override fun run() {
             if (monitoring && !paused && !manual) captureScreenInternal()
-            if (monitoring) mainHandler.postDelayed(this, 160)
+            if (monitoring) mainHandler.postDelayed(this, 650)
         }
     }
 
@@ -40,7 +42,7 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "Служба подключена"
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) { if (monitoring && !paused && !manual && !scanInFlight.get()) { mainHandler.removeCallbacks(monitorTask); mainHandler.post(monitorTask) } }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) { /* Fixed-rate capture avoids Android screenshot throttling. */ }
     override fun onInterrupt() { screenStatus = "Служба временно прервана; ожидаю продолжения" }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
@@ -58,7 +60,10 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = "Снимок экрана требует Android 11+"
             return
         }
+        val now = SystemClock.elapsedRealtime()
+        if (now < nextScreenshotAllowedAt) return
         if (!scanInFlight.compareAndSet(false, true)) return
+        nextScreenshotAllowedAt = now + screenshotIntervalMs
         screenStatus = "Считываю игровое поле…"
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, object : TakeScreenshotCallback {
@@ -82,8 +87,9 @@ class GameAccessibilityService : AccessibilityService() {
                     val field = Bitmap.createBitmap(full, 0, top, screenW, screenH - top)
                     full.recycle()
 
+                    screenshotIntervalMs = 650L
                     val detection = detectPlayfield(field)
-                    handleAutoControl(detection, field.width, top, screenW, screenH)
+                    handleAutoControl(detection, field.height, top, screenW, screenH)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
                     lastBirdX = detection.birdX
@@ -96,16 +102,24 @@ class GameAccessibilityService : AccessibilityService() {
                 }
 
                 override fun onFailure(errorCode: Int) {
+                    screenshotIntervalMs = when (errorCode) {
+                        3 -> 1400L
+                        2 -> 1100L
+                        else -> 900L
+                    }
+                    nextScreenshotAllowedAt = SystemClock.elapsedRealtime() + screenshotIntervalMs
                     screenStatus = when (errorCode) {
-                        1 -> "Снимок отклонён системой"
-                        2 -> "Снимок недоступен"
-                        3 -> "Слишком частые запросы"
+                        1 -> "Снимок отклонён системой • повтор через паузу"
+                        2 -> "Снимок недоступен • повтор через паузу"
+                        3 -> "Лимит снимков Android • пауза 1,4 с"
                         else -> "Ошибка снимка ($errorCode)"
                     }
                     scanInFlight.set(false)
                 }
             })
         } catch (e: Exception) {
+            screenshotIntervalMs = 1100L
+            nextScreenshotAllowedAt = SystemClock.elapsedRealtime() + screenshotIntervalMs
             screenStatus = "Ошибка снимка: " + e.javaClass.simpleName
             scanInFlight.set(false)
         }
@@ -279,7 +293,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAutoControl(
-        d: Detection, fieldWidth: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
+        d: Detection, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
     ) {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
@@ -305,9 +319,9 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            val supportLine = fieldWidth * 0.53f
-            val falling = velocity > 0.025f
-            if (d.birdY > supportLine && falling && now - lastAutoTapAt >= 360L) {
+            val supportLine = fieldHeight * 0.44f
+            val falling = velocity > 0.008f || previousBirdAt == now
+            if (d.birdY > supportLine && falling && now - lastAutoTapAt >= 280L) {
                 lastAutoTapAt = now
                 screenStatus = "ПОДДЕРЖКА ДО ТРУБ • y=${d.birdY}"
                 tap(tapX, tapY)
@@ -321,7 +335,7 @@ class GameAccessibilityService : AccessibilityService() {
         val gapHeight = (d.gapBottom - d.gapTop).toFloat()
         val distance = d.obstacleX - d.birdX
         val approaching = distance in
-            (fieldWidth * 0.035f).toInt()..(fieldWidth * 0.78f).toInt()
+            (fieldHeight * 0.035f).toInt()..(fieldHeight * 0.78f).toInt()
         val predictedY = d.birdY + velocity * 135f
         val tooLow = predictedY > gapCenter + gapHeight * 0.055f
         val descending = velocity > 0.015f
