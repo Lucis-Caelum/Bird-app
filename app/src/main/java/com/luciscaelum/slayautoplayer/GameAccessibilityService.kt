@@ -368,7 +368,7 @@ class GameAccessibilityService : AccessibilityService() {
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
             (d.birdY - previousBirdY).toFloat() / dt else 0f
         // Smooth frame-to-frame noise: positive is falling, negative is rising.
-        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.55f + rawVelocity * 0.45f else 0f
+        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.30f + rawVelocity * 0.70f else 0f
         val rawGravity = if (dt > 0f) ((velocity - previousVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
         val gravity = (rawGravity * 0.35f + 0.0012f * 0.65f).coerceIn(0.00025f, 0.0028f)
         previousBirdY = d.birdY
@@ -385,10 +385,9 @@ class GameAccessibilityService : AccessibilityService() {
             // While a pipe is being acquired, use a cautious height guard rather than waiting
             // until the avatar is already at the bottom edge.
             val guardY = fieldHeight * 0.54f
-            if (d.birdY > guardY && velocity > 0.015f && now - lastAutoTapAt >= 150L) {
-                lastAutoTapAt = now
+            if (d.birdY > guardY && velocity > 0.015f && now - lastAutoTapAt >= 120L) {
                 screenStatus = "ПОДДЕРЖКА • y=${d.birdY} • v=${"%.2f".format(velocity)}"
-                tap(tapX, tapY)
+                if (tap(tapX, tapY)) lastAutoTapAt = now
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
                     else "ПТИЦА y=${d.birdY} • поиск следующей трубы"
@@ -417,19 +416,19 @@ class GameAccessibilityService : AccessibilityService() {
         val error = predictedY - targetY
         val distanceWindow = distance in 0f..(fieldWidth * 1.35f)
         // Use a wider neutral band to avoid chasing tiny detector fluctuations.
-        val deadBand = gapHeight * 0.075f
+        val deadBand = gapHeight * 0.055f
 
         // One flap is a discrete impulse. Do not stack another flap while the previous
         // impulse is still lifting the avatar; re-evaluate only after its effect is visible.
         // In particular, a large position error must NOT bypass this recovery lock.
-        val recoveryLockMs = 175L
-        val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < recoveryLockMs
-        val needsLift = error > deadBand && (velocity > -0.13f || error > gapHeight * 0.20f)
-        val tapCooldown = 175L
-        if (distanceWindow && needsLift && !stillRecoveringFromTap && now - lastAutoTapAt >= tapCooldown) {
-            lastAutoTapAt = now
+        val tapCooldown = 120L
+        val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < tapCooldown
+        // Re-check every incoming frame. Keep allowing a correction during ascent only
+        // when the predicted crossing remains substantially below the safe target.
+        val needsLift = error > deadBand && (velocity > -0.10f || error > gapHeight * 0.16f)
+        if (distanceWindow && needsLift && !stillRecoveringFromTap) {
             screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
-            tap(tapX, tapY)
+            if (tap(tapX, tapY)) lastAutoTapAt = now
         } else {
             screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}" + if (stillRecoveringFromTap) " • жду эффект касания" else ""
         }
@@ -475,9 +474,9 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = reason
     }
 
-    fun tap(x: Float, y: Float, done: (() -> Unit)? = null) {
-        if (Build.VERSION.SDK_INT < 24 || paused || manual || !monitoring) return
-        if (!gestureInFlight.compareAndSet(false, true)) return
+    fun tap(x: Float, y: Float, done: (() -> Unit)? = null): Boolean {
+        if (Build.VERSION.SDK_INT < 24 || paused || manual || !monitoring) return false
+        if (!gestureInFlight.compareAndSet(false, true)) return false
         mainHandler.post {
             if (paused || manual || !monitoring) {
                 gestureInFlight.set(false)
@@ -506,6 +505,7 @@ class GameAccessibilityService : AccessibilityService() {
                 gestureInFlight.set(false)
             }
         }
+        return true
     }
 
     override fun onDestroy() {
