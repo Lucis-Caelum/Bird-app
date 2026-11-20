@@ -96,7 +96,7 @@ class GameAccessibilityService : AccessibilityService() {
             }
         )
         } catch (e: Exception) {
-            screenStatus = "Ошибка запуска снимка: " + e.javaClass.simpleName
+            screenStatus = "Ошибка запуска снимка: " + e.javaClass.simpleName + ": " + (e.message ?: "без подробностей")
             Toast.makeText(applicationContext, "Bird Play: " + screenStatus, Toast.LENGTH_LONG).show()
         }
     }
