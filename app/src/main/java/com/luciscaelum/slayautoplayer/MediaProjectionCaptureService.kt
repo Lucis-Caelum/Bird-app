@@ -79,7 +79,8 @@ class MediaProjectionCaptureService : Service() {
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             imageReader?.setOnImageAvailableListener({ reader ->
                 val now = SystemClock.elapsedRealtime()
-                if (now - lastFrameAt < FRAME_INTERVAL_MS || !GameAccessibilityService.monitoring) {
+                val frameInterval = if (GameAccessibilityService.monitoring) FRAME_INTERVAL_MS else PREVIEW_INTERVAL_MS
+                if (now - lastFrameAt < frameInterval) {
                     val skipped = reader.acquireLatestImage()
                     skipped?.close()
                     return@setOnImageAvailableListener
@@ -149,6 +150,7 @@ class MediaProjectionCaptureService : Service() {
         private const val CHANNEL_ID = "bird_play_capture"
         private const val NOTIFICATION_ID = 7321
         private const val FRAME_INTERVAL_MS = 160L
+        private const val PREVIEW_INTERVAL_MS = 450L
         private const val HEADER_CROP_FRACTION = 0.117f
     }
 }
