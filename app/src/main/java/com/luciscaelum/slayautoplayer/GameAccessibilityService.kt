@@ -150,7 +150,6 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
-        if (!monitoring || paused || manual) return
         val detection = detectPlayfield(field)
         if (detection.activeGame && !wasActiveGame) {
             previousBirdY = -1
@@ -163,7 +162,11 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
         }
         wasActiveGame = detection.activeGame
-        handleAutoControl(detection, field.width, field.height, cropTop, screenW, screenH)
+        if (monitoring && !paused && !manual) {
+            handleAutoControl(detection, field.width, field.height, cropTop, screenW, screenH)
+        } else {
+            screenStatus = "ПРЕДПРОСМОТР • " + detection.message
+        }
         lastFrameWidth = field.width
         lastFrameHeight = field.height
         lastBirdX = detection.birdX
@@ -372,14 +375,10 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            val supportLine = fieldHeight * 0.44f
-            val falling = velocity > 0.008f || previousBirdAt == now
-            if (d.birdY > supportLine && falling && now - lastAutoTapAt >= 280L) {
-                lastAutoTapAt = now
-                screenStatus = "ПОДДЕРЖКА ДО ТРУБ • y=${d.birdY}"
-                tap(tapX, tapY)
+            screenStatus = if (d.obstacleX >= 0) {
+                "ТРУБА ОБНАРУЖЕНА, НО ПРОХОД НЕ ПОДТВЕРЖДЁН • без слепого клика"
             } else {
-                screenStatus = "ИГРА • персонаж y=${d.birdY} • ожидаю первые трубы"
+                "ПТИЦА y=${d.birdY} • жду распознавания трубы • без слепого клика"
             }
             return
         }
