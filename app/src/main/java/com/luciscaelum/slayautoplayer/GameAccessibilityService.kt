@@ -152,6 +152,30 @@ class GameAccessibilityService : AccessibilityService() {
         }
     }
 
+    fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+        if (!monitoring || paused || manual) return
+        val detection = detectPlayfield(field)
+        if (detection.activeGame && !wasActiveGame) {
+            previousBirdY = -1
+            previousBirdAt = 0L
+            lastAutoTapAt = 0L
+            screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
+        } else if (!detection.activeGame && wasActiveGame) {
+            previousBirdY = -1
+            previousBirdAt = 0L
+            screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
+        }
+        wasActiveGame = detection.activeGame
+        handleAutoControl(detection, field.width, field.height, cropTop, screenW, screenH)
+        lastFrameWidth = field.width
+        lastFrameHeight = field.height
+        lastBirdX = detection.birdX
+        lastBirdY = detection.birdY
+        lastObstacleX = detection.obstacleX
+        lastGapTop = detection.gapTop
+        lastGapBottom = detection.gapBottom
+    }
+
     private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String)
     private fun detectPlayfield(bitmap: Bitmap): Detection {
         val w = bitmap.width
@@ -471,7 +495,7 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastGapBottom = -1
         @Volatile private var instance: GameAccessibilityService? = null
 
-        fun togglePause() {
+        fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {\n            instance?.processCapturedFrame(field, cropTop, screenW, screenH)\n        }\n\n        fun togglePause() {
             val service = instance ?: return
             if (monitoring) service.stopMonitoring("Пауза")
             else service.startMonitoringInternal()
