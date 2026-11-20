@@ -88,11 +88,11 @@ class OverlayService : Service() {
             })
         }
 
-                button("МОНИТОРИНГ / ПАУЗА") {
+                button("АВТО / ПАУЗА") {
             GameAccessibilityService.togglePause()
             refresh()
         }
-        button("РУЧНОЙ РЕЖИМ") {
+        button("РУЧНОЙ") {
             GameAccessibilityService.manualTakeover()
             refresh()
         }
@@ -106,7 +106,7 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            dp(156),
+            dp(148),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
