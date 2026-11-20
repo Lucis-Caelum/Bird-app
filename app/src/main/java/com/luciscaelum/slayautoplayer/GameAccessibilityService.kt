@@ -335,7 +335,7 @@ class GameAccessibilityService : AccessibilityService() {
         }
         if (largestGap < h * 0.08f || largestGap > h * 0.62f) {
             return Detection(
-                birdX = birdX, birdY = birdY, obstacleX = pipeX,
+                birdX = birdX, birdY = birdY, obstacleX = pipeLeadingEdgeX,
                 activeGame = true,
                 message = "ТРУБА x=$pipeLeadingEdgeX • просвет не подтверждён"
             )
