@@ -12,9 +12,6 @@ import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -22,9 +19,6 @@ class GameAccessibilityService : AccessibilityService() {
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanInFlight = AtomicBoolean(false)
-    private val textRecognizer by lazy {
-        TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
-    }
     private val monitorTask = object : Runnable {
         override fun run() {
             if (monitoring && !paused && !manual) captureScreenInternal()
@@ -57,7 +51,7 @@ class GameAccessibilityService : AccessibilityService() {
             return
         }
         if (!scanInFlight.compareAndSet(false, true)) return
-        screenStatus = "Сканирую область счёта…"
+        screenStatus = "Считываю игровое поле…"
         try {
             takeScreenshot(Display.DEFAULT_DISPLAY, screenshotExecutor, object : TakeScreenshotCallback {
                 override fun onSuccess(result: ScreenshotResult) {
@@ -72,31 +66,19 @@ class GameAccessibilityService : AccessibilityService() {
                         return
                     }
 
-                    // Score is at the upper-left, below Android's status bar.
-                    // Exclude the system clock and the rest of the game UI.
-                    val left = 0
-                    val top = (full.height * 0.075f).toInt().coerceAtMost(full.height - 1)
-                    val right = (full.width * 0.42f).toInt().coerceAtLeast(1)
-                    val bottom = (full.height * 0.235f).toInt().coerceAtMost(full.height)
-                    val roi = Bitmap.createBitmap(full, left, top, right - left, bottom - top)
+                    // Telegram status bar and Mini App header occupy the top ~11.7%.
+                    // Keep the complete playfield below them for visual game analysis.
+                    val top = (full.height * 0.117f).toInt().coerceIn(1, full.height - 1)
+                    val field = Bitmap.createBitmap(full, 0, top, full.width, full.height - top)
                     full.recycle()
 
-                    textRecognizer.process(InputImage.fromBitmap(roi, 0))
-                        .addOnSuccessListener { visionText ->
-                            val recognized = visionText.text.replace("\\s+".toRegex(), " ").trim()
-                            lastOcrText = recognized.take(100)
-                            // Use only numeric tokens from the score ROI; never parse status-bar time.
-                            val tokens = Regex("\\b\\d{1,4}\\b").findAll(recognized).map { it.value }.toList()
-                            lastScoreCandidate = tokens.firstOrNull() ?: "—"
-                            screenStatus = if (tokens.isEmpty()) "Мониторинг: счёт в области не найден" else "Мониторинг: область счёта прочитана"
-                            roi.recycle()
-                            scanInFlight.set(false)
-                        }
-                        .addOnFailureListener {
-                            screenStatus = "Ошибка распознавания области счёта"
-                            roi.recycle()
-                            scanInFlight.set(false)
-                        }
+                    // Temporary frame-capture stage: image analysis/controller comes next.
+                    // Do not run OCR; game score and Mini App title are irrelevant.
+                    lastFrameWidth = field.width
+                    lastFrameHeight = field.height
+                    field.recycle()
+                    screenStatus = "Игровое поле захвачено • детектор ещё не включён"
+                    scanInFlight.set(false)
                 }
 
                 override fun onFailure(errorCode: Int) {
@@ -151,7 +133,6 @@ class GameAccessibilityService : AccessibilityService() {
         stopMonitoring("Служба отключена")
         if (instance === this) instance = null
         screenshotExecutor.shutdown()
-        textRecognizer.close()
         super.onDestroy()
     }
 
@@ -163,8 +144,8 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var monitoring = false
             private set
         @Volatile var screenStatus = "Служба не подключена"
-        @Volatile var lastOcrText = ""
-        @Volatile var lastScoreCandidate = "—"
+        @Volatile var lastFrameWidth = 0
+        @Volatile var lastFrameHeight = 0
         @Volatile private var instance: GameAccessibilityService? = null
 
         fun togglePause() {
