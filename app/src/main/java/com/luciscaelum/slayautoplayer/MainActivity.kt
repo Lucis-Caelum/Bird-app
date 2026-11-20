@@ -1,6 +1,8 @@
 package com.luciscaelum.slayautoplayer
 
 import android.app.Activity
+import android.media.projection.MediaProjectionManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -14,6 +16,7 @@ import android.widget.TextView
 import android.widget.Toast
 
 class MainActivity : Activity() {
+    private val projectionRequest = 4107
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,7 +65,12 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
 
-        addButton("3. Показать плавающую панель") {
+        addButton("3. Разрешить захват игрового экрана") {
+            val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(manager.createScreenCaptureIntent(), projectionRequest)
+        }
+
+        addButton("4. Показать плавающую панель") {
             if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
                 Toast.makeText(this, "Сначала включи разрешение «Поверх других окон»", Toast.LENGTH_LONG).show()
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
@@ -83,5 +91,20 @@ class MainActivity : Activity() {
 
         val scroll = ScrollView(this).apply { addView(content) }
         setContentView(scroll)
+    }
+
+    @Deprecated("MediaProjection consent result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == projectionRequest && resultCode == RESULT_OK && data != null) {
+            val intent = Intent(this, MediaProjectionCaptureService::class.java).apply {
+                putExtra(MediaProjectionCaptureService.EXTRA_RESULT_CODE, resultCode)
+                putExtra(MediaProjectionCaptureService.EXTRA_RESULT_DATA, data)
+            }
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+            Toast.makeText(this, "Захват экрана разрешён. Теперь запускай панель.", Toast.LENGTH_LONG).show()
+        } else if (requestCode == projectionRequest) {
+            Toast.makeText(this, "Разрешение на захват экрана не выдано", Toast.LENGTH_LONG).show()
+        }
     }
 }
