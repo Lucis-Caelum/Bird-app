@@ -60,9 +60,9 @@ class OverlayService : Service() {
         status = TextView(this).apply {
             text = "⠿ BIRD PLAY\nИгровое поле: ожидание"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 8f
-            maxWidth = dp(126)
-            maxLines = 4
+            textSize = 9f
+            maxWidth = dp(158)
+            maxLines = 6
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
@@ -107,7 +107,7 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            dp(116),
+            dp(150),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -162,12 +162,13 @@ class OverlayService : Service() {
 
     private fun refresh() {
         val state = if (GameAccessibilityService.monitoring) "МОНИТОРИНГ" else "ПАУЗА"
-        val detail = GameAccessibilityService.screenStatus.take(54)
+        val detail = GameAccessibilityService.screenStatus.take(88)
         val bird = "P ${GameAccessibilityService.lastBirdX},${GameAccessibilityService.lastBirdY}"
         val pipe = "T ${GameAccessibilityService.lastObstacleX}"
         val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
         val tap = GameAccessibilityService.lastTapStatus
-        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap • $tap • VOL− STOP"
+        val counts = "A${GameAccessibilityService.autoTapCount} / H${GameAccessibilityService.manualTapCount}"
+        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts • $tap\nVOL− = STOP"
     }
 
     override fun onDestroy() {
