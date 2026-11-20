@@ -155,8 +155,8 @@ class OverlayService : Service() {
     private fun refresh() {
         val state = if (GameAccessibilityService.paused) "PAUSE" else "READY"
         val text = GameAccessibilityService.lastOcrText
-        val preview = if (text.isBlank()) "" else "\\nТекст: ${text.take(55)}"
-        status?.text = "⠿  BIRD PLAY  •  $state\\nСчёт-кандидат: ${GameAccessibilityService.lastScoreCandidate}\\n${GameAccessibilityService.screenStatus}$preview\\nАвтопилот: выключен"
+        val preview = if (text.isBlank()) "" else "\nТекст: ${text.take(55)}"
+        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт-кандидат: ${GameAccessibilityService.lastScoreCandidate}\n${GameAccessibilityService.screenStatus}$preview\nАвтопилот: выключен"
     }
 
     override fun onDestroy() {
