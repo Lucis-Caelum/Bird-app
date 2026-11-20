@@ -364,9 +364,13 @@ class GameAccessibilityService : AccessibilityService() {
             return
         }
 
-        val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L) else 0L
-        val velocity = if (previousBirdY >= 0 && dt > 0L) (d.birdY - previousBirdY).toFloat() / dt else 0f
-        val acceleration = if (dt > 0L) ((velocity - previousVerticalVelocity) / dt).coerceIn(-0.012f, 0.012f) else 0f
+        val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
+        val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
+            (d.birdY - previousBirdY).toFloat() / dt else 0f
+        // Smooth frame-to-frame noise: positive is falling, negative is rising.
+        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.55f + rawVelocity * 0.45f else 0f
+        val rawGravity = if (dt > 0f) ((velocity - previousVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
+        val gravity = (rawGravity * 0.35f + 0.0012f * 0.65f).coerceIn(0.00025f, 0.0028f)
         previousBirdY = d.birdY
         previousBirdAt = now
         previousVerticalVelocity = velocity
@@ -378,14 +382,16 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            val lowThreshold = (fieldHeight * 0.58f).toInt()
-            if (d.birdY >= lowThreshold && velocity > 0.004f && now - lastAutoTapAt >= 230L) {
+            // While a pipe is being acquired, use a cautious height guard rather than waiting
+            // until the avatar is already at the bottom edge.
+            val guardY = fieldHeight * 0.54f
+            if (d.birdY > guardY && velocity > 0.015f && now - lastAutoTapAt >= 150L) {
                 lastAutoTapAt = now
-                screenStatus = "СТАБИЛИЗАЦИЯ • y=${d.birdY}"
+                screenStatus = "ПОДДЕРЖКА • y=${d.birdY} • v=${"%.2f".format(velocity)}"
                 tap(tapX, tapY)
             } else {
-                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • просвет не подтверждён"
-                    else "ПТИЦА y=${d.birdY} • ищу следующую трубу"
+                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
+                    else "ПТИЦА y=${d.birdY} • поиск следующей трубы"
             }
             previousObstacleX = -1
             previousObstacleAt = 0L
@@ -394,29 +400,34 @@ class GameAccessibilityService : AccessibilityService() {
 
         val gapTop = d.gapTop.toFloat()
         val gapBottom = d.gapBottom.toFloat()
-        val gapHeight = gapBottom - gapTop
+        val gapHeight = (gapBottom - gapTop).coerceAtLeast(1f)
+        val targetY = gapTop + gapHeight * 0.50f
         val distance = (d.obstacleX - d.birdX).toFloat()
-        val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L) else 0L
-        val obstacleSpeed = if (previousObstacleX > d.obstacleX && obstacleDt > 0L)
+
+        val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
+        val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt > 0f)
             (previousObstacleX - d.obstacleX).toFloat() / obstacleDt else 0f
+        val obstacleSpeed = if (measuredSpeed > 0.04f) measuredSpeed else fieldWidth * 0.00135f
         previousObstacleX = d.obstacleX
         previousObstacleAt = now
 
-        val timeToPipe = if (obstacleSpeed > 0.05f) (distance / obstacleSpeed).coerceIn(90f, 1050f)
-            else (distance / (fieldWidth * 0.00075f)).coerceIn(180f, 900f)
-        val predictedY = d.birdY + velocity * timeToPipe + 0.5f * acceleration * timeToPipe * timeToPipe
-        val safeTop = gapTop + gapHeight * 0.28f
-        val safeBottom = gapBottom - gapHeight * 0.28f
-        val predictedTooLow = predictedY > safeBottom
-        val currentlyLowAndFalling = d.birdY > safeBottom && velocity > 0f
-        val approaching = distance in 0f..(fieldWidth * 0.88f)
+        // Start correcting while the obstacle is still more than one screen-width away.
+        val timeToPipe = (distance / obstacleSpeed).coerceIn(80f, 850f)
+        val predictedY = d.birdY + velocity * timeToPipe + 0.5f * gravity * timeToPipe * timeToPipe
+        val error = predictedY - targetY
+        val distanceWindow = distance in 0f..(fieldWidth * 1.35f)
+        val deadBand = gapHeight * 0.075f
 
-        if (approaching && (predictedTooLow || currentlyLowAndFalling) && now - lastAutoTapAt >= 210L) {
+        // Repeated pulses are allowed while the predicted crossing point remains below target.
+        // Once the bird is rising fast enough, the velocity term predicts the recovery and pauses taps.
+        val needsLift = error > deadBand && (velocity > -0.20f || error > gapHeight * 0.24f)
+        val tapCooldown = if (error > gapHeight * 0.30f) 125L else 165L
+        if (distanceWindow && needsLift && now - lastAutoTapAt >= tapCooldown) {
             lastAutoTapAt = now
-            screenStatus = "АВТОКЛИК • y=${d.birdY} → прогноз ${predictedY.toInt()} • цель ${safeTop.toInt()}..${safeBottom.toInt()}"
+            screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
             tap(tapX, tapY)
         } else {
-            screenStatus = "ПТИЦА y=${d.birdY} • ТРУБА x=${d.obstacleX} • G ${d.gapTop}..${d.gapBottom} • прогноз ${predictedY.toInt()}"
+            screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}"
         }
     }
 
