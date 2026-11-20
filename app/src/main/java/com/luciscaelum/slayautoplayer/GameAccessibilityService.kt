@@ -22,6 +22,7 @@ class GameAccessibilityService : AccessibilityService() {
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanInFlight = AtomicBoolean(false)
+    private val gestureInFlight = AtomicBoolean(false)
     private var previousBirdY = -1
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
@@ -277,44 +278,61 @@ class GameAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun handleAutoControl(d:Detection,fieldWidth:Int,cropTop:Int,screenWidth:Int,screenHeight:Int) {
-        if(!monitoring || paused || manual) return
-        val now=SystemClock.elapsedRealtime()
-        val birdVisible = d.birdX >= 0 && d.birdY >= 0
-        if (!birdVisible) {
+    private fun handleAutoControl(
+        d: Detection, fieldWidth: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
+    ) {
+        if (!monitoring || paused || manual) return
+        val now = SystemClock.elapsedRealtime()
+        if (!d.activeGame || d.birdX < 0 || d.birdY < 0) {
             previousBirdY = -1
             previousBirdAt = 0L
             screenStatus = d.message
             return
         }
+        val velocity = if (previousBirdY >= 0 && previousBirdAt > 0L) {
+            (d.birdY - previousBirdY).toFloat() /
+                (now - previousBirdAt).coerceAtLeast(1L)
+        } else 0f
+        previousBirdY = d.birdY
+        previousBirdAt = now
+
+        val sx = resources.displayMetrics.widthPixels.toFloat() / screenWidth.coerceAtLeast(1)
+        val sy = resources.displayMetrics.heightPixels.toFloat() / screenHeight.coerceAtLeast(1)
+        val tapX = (screenWidth * 0.78f * sx)
+            .coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
+        val tapY = ((cropTop + (screenHeight - cropTop) * 0.52f) * sy)
+            .coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
+
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
-        lastSceneSeenAt = now
-        val velocity=if(previousBirdY>=0 && previousBirdAt>0L) (d.birdY-previousBirdY).toFloat()/(now-previousBirdAt).coerceAtLeast(1L) else 0f
-        previousBirdY=d.birdY; previousBirdAt=now
-        val sx=resources.displayMetrics.widthPixels.toFloat()/screenWidth.coerceAtLeast(1)
-        val sy=resources.displayMetrics.heightPixels.toFloat()/screenHeight.coerceAtLeast(1)
-        val tx=(screenWidth*0.76f*sx).coerceIn(1f,resources.displayMetrics.widthPixels-1f)
-        val ty=((cropTop+(screenHeight-cropTop)*0.52f)*sy).coerceIn(1f,resources.displayMetrics.heightPixels-1f)
         if (!hasGap) {
-            val stabiliseLine=(screenHeight-cropTop)*0.52f
-            if(d.birdY>stabiliseLine && now-lastAutoTapAt>=300L) {
-                lastAutoTapAt=now
-                tap(tx,ty)
-                screenStatus="ПОДДЕРЖКА ДО ТРУБ • персонаж y=${d.birdY}"
-            } else screenStatus="ПЕРСОНАЖ y=${d.birdY} • жду первых труб"
+            val supportLine = fieldWidth * 0.53f
+            val falling = velocity > 0.025f
+            if (d.birdY > supportLine && falling && now - lastAutoTapAt >= 360L) {
+                lastAutoTapAt = now
+                screenStatus = "ПОДДЕРЖКА ДО ТРУБ • y=\${d.birdY} • v=\${"%.2f".format(velocity)}"
+                tap(tapX, tapY)
+            } else {
+                screenStatus = "ИГРА • персонаж y=\${d.birdY} • ожидаю первые трубы"
+            }
             return
         }
-        val center=(d.gapTop+d.gapBottom)/2f
-        val gap=(d.gapBottom-d.gapTop).toFloat()
-        val distance=d.obstacleX-d.birdX
-        val approach=distance in (fieldWidth*0.04f).toInt()..(fieldWidth*0.72f).toInt()
-        val predicted=d.birdY+velocity*115f
-        val target=center-gap*0.06f
-        if(approach && predicted>target+gap*0.08f && now-lastAutoTapAt>=260L) {
-            lastAutoTapAt=now
-            tap(tx,ty)
-            screenStatus="АВТОКЛИК • птица y=${d.birdY} • проход ${d.gapTop}..${d.gapBottom}"
-        } else screenStatus="ИГРА • птица y=${d.birdY} • труба x=${d.obstacleX} • проход ${d.gapTop}..${d.gapBottom}"
+
+        val gapCenter = (d.gapTop + d.gapBottom) / 2f
+        val gapHeight = (d.gapBottom - d.gapTop).toFloat()
+        val distance = d.obstacleX - d.birdX
+        val approaching = distance in
+            (fieldWidth * 0.035f).toInt()..(fieldWidth * 0.78f).toInt()
+        val predictedY = d.birdY + velocity * 135f
+        val tooLow = predictedY > gapCenter + gapHeight * 0.055f
+        val descending = velocity > 0.015f
+
+        if (approaching && tooLow && descending && now - lastAutoTapAt >= 360L) {
+            lastAutoTapAt = now
+            screenStatus = "АВТОКЛИК • bird=\${d.birdY} • gap=\${d.gapTop}..\${d.gapBottom}"
+            tap(tapX, tapY)
+        } else {
+            screenStatus = "ПТИЦА y=\${d.birdY} • ТРУБА x=\${d.obstacleX} • ПРОХОД \${d.gapTop}..\${d.gapBottom}"
+        }
     }
 
     private fun startMonitoringInternal() {
@@ -344,20 +362,32 @@ class GameAccessibilityService : AccessibilityService() {
 
     fun tap(x: Float, y: Float, done: (() -> Unit)? = null) {
         if (Build.VERSION.SDK_INT < 24 || paused || manual || !monitoring) return
-        val path = Path().apply { moveTo(x, y) }
-        val gesture = GestureDescription.Builder()
-            .addStroke(GestureDescription.StrokeDescription(path, 0, 45))
-            .build()
-        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                screenStatus = "КАСАНИЕ ДОСТАВЛЕНО"
-                done?.invoke()
+        if (!gestureInFlight.compareAndSet(false, true)) return
+        mainHandler.post {
+            if (paused || manual || !monitoring) {
+                gestureInFlight.set(false)
+                return@post
             }
-            override fun onCancelled(gestureDescription: GestureDescription?) {
-                screenStatus = "ANDROID ОТМЕНИЛ КАСАНИЕ"
+            val path = Path().apply { moveTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 55))
+                .build()
+            val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    screenStatus = "ANDROID: КАСАНИЕ ВЫПОЛНЕНО"
+                    gestureInFlight.set(false)
+                    done?.invoke()
+                }
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    screenStatus = "ANDROID: КАСАНИЕ ОТМЕНЕНО"
+                    gestureInFlight.set(false)
+                }
+            }, null)
+            if (!accepted) {
+                screenStatus = "ANDROID: ЖЕСТ НЕ ПРИНЯТ"
+                gestureInFlight.set(false)
             }
-        }, null)
-        if (!accepted) screenStatus = "ANDROID НЕ ПРИНЯЛ КАСАНИЕ"
+        }
     }
 
     override fun onDestroy() {
