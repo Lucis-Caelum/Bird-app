@@ -26,7 +26,7 @@ class OverlayService : Service() {
             setBackgroundColor(0xEE20242C.toInt())
         }
         status = TextView(this).apply {
-            text = "SLAY • READY\nСчёт: — / 1440"
+            text = "BIRD PLAY • READY\\nСчёт: —"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 13f
         }
@@ -47,7 +47,8 @@ class OverlayService : Service() {
         return START_STICKY
     }
     private fun refresh() {
-        status?.text = "SLAY • " + if (GameAccessibilityService.paused) "PAUSE" else "READY" + "\nСчёт: — / 1440"
+        val state = if (GameAccessibilityService.paused) "PAUSE" else "READY"
+        status?.text = "BIRD PLAY • $state\\nСчёт: —"
     }
     override fun onDestroy() {
         panel?.let { wm.removeView(it) }
