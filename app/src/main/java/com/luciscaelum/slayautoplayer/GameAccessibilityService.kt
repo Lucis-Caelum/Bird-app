@@ -171,6 +171,7 @@ class GameAccessibilityService : AccessibilityService() {
             lastAutoTapAt = 0L
             previousObstacleX = -1
             previousObstacleAt = 0L
+            smoothedObstacleSpeed = 0f
             previousVerticalVelocity = 0f
             previousRawVerticalVelocity = 0f
             estimatedFlapVelocity = -0.55f
