@@ -36,6 +36,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var lastSceneSeenAt = 0L
     private var previousObstacleX = -1
     private var previousObstacleAt = 0L
+    private var smoothedObstacleSpeed = 0f
     private var previousVerticalVelocity = 0f
     private var previousRawVerticalVelocity = 0f
     private var estimatedFlapVelocity = -0.55f
@@ -392,10 +393,13 @@ class GameAccessibilityService : AccessibilityService() {
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
             (d.birdY - previousBirdY).toFloat() / dt else 0f
         // Responsive velocity estimate; excessive smoothing makes the parabola lag after taps.
-        val velocity = if (previousBirdAt > 0L) previousVerticalVelocity * 0.25f + rawVelocity * 0.75f else 0f
         val rawGravity = if (dt > 0f && previousBirdAt > 0L)
             ((rawVelocity - previousRawVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
-        val gravity = (rawGravity * 0.25f + 0.0012f * 0.75f).coerceIn(0.00025f, 0.0028f)
+        val gravity = (rawGravity * 0.20f + 0.0012f * 0.80f).coerceIn(0.00035f, 0.0024f)
+        // rawVelocity is average speed across the previous frame; estimate speed at its end.
+        val instantaneousVelocity = if (dt > 0f) rawVelocity + gravity * dt * 0.5f else 0f
+        val velocity = if (previousBirdAt > 0L)
+            previousVerticalVelocity * 0.40f + instantaneousVelocity * 0.60f else 0f
 
         // Learn the actual post-flap velocity. Screen Y grows downward, so gravity
         // makes the measured interval-average velocity LESS negative: subtract half-step gravity.
@@ -450,32 +454,41 @@ class GameAccessibilityService : AccessibilityService() {
         val distance = (d.obstacleX - d.birdX).toFloat()
 
         val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
-        val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt > 0f)
+        val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt in 35f..500f)
             (previousObstacleX - d.obstacleX).toFloat() / obstacleDt else 0f
-        val obstacleSpeed = if (measuredSpeed > 0.04f) measuredSpeed else fieldWidth * 0.00135f
+        if (measuredSpeed in 0.08f..3.5f) {
+            smoothedObstacleSpeed = if (smoothedObstacleSpeed > 0f)
+                smoothedObstacleSpeed * 0.55f + measuredSpeed * 0.45f else measuredSpeed
+        }
+        val fallbackSpeed = fieldWidth * 0.00135f
+        val obstacleSpeed = if (smoothedObstacleSpeed > 0f) smoothedObstacleSpeed else fallbackSpeed
         previousObstacleX = d.obstacleX
         previousObstacleAt = now
 
-        val timeToPipe = (distance / obstacleSpeed).coerceIn(70f, 1000f)
-        val noTapPrediction = d.birdY + velocity * timeToPipe + 0.5f * gravity * timeToPipe * timeToPipe
-        // Compare the current ballistic arc with the arc after a fresh flap impulse.
-        val afterTapPrediction = d.birdY + estimatedFlapVelocity * timeToPipe +
+        val timeToPipe = (distance / obstacleSpeed).coerceIn(0f, 1400f)
+        // Include processing and Android gesture latency: the flap impulse arrives later.
+        val reactionMs = 105f
+        val noTapPrediction = d.birdY + velocity * timeToPipe +
             0.5f * gravity * timeToPipe * timeToPipe
-        val safeMargin = (gapHeight * 0.12f).coerceAtLeast(fieldHeight * 0.012f)
+        val tapDelay = min(reactionMs, timeToPipe)
+        val afterTapPrediction = if (timeToPipe > reactionMs) {
+            val yAtTap = d.birdY + velocity * tapDelay + 0.5f * gravity * tapDelay * tapDelay
+            val remaining = timeToPipe - tapDelay
+            yAtTap + estimatedFlapVelocity * remaining +
+                0.5f * gravity * remaining * remaining
+        } else noTapPrediction
+        val safeMargin = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.010f)
         val safeTop = gapTop + safeMargin
         val safeBottom = gapBottom - safeMargin
-        val distanceWindow = distance in 0f..(fieldWidth * 1.5f)
+        val distanceWindow = distance > 0f && distance < fieldWidth * 1.8f
 
-        // Select a flap only when the no-tap trajectory is too low and a tap improves it.
-        // There is no arbitrary cooldown: gestureInFlight prevents overlapping Android taps.
+        // Tap only when the delayed post-flap trajectory actually fits inside the opening.
+        // This waits for a useful point on the falling arc instead of firing too early.
         val predictedTooLow = noTapPrediction > safeBottom
-        val tapImprovesPath = afterTapPrediction < noTapPrediction - safeMargin * 0.25f
-        val tapWouldOvershootTop = afterTapPrediction < safeTop
-        // While the bird is already climbing strongly, let that impulse work.
-        // Only interrupt the ascent if the no-tap path is projected to miss below the opening.
-        val strongAscent = velocity < -0.16f && noTapPrediction <= gapBottom
-        val shouldTap = distanceWindow && predictedTooLow && tapImprovesPath &&
-            (!tapWouldOvershootTop || noTapPrediction > gapBottom) && !strongAscent
+        val tapTrajectoryFits = afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
+        val tapImprovesPath = afterTapPrediction < noTapPrediction - safeMargin * 0.15f
+        val shouldTap = distanceWindow && timeToPipe > reactionMs &&
+            predictedTooLow && tapTrajectoryFits && tapImprovesPath
 
         if (shouldTap) {
             screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
@@ -489,7 +502,7 @@ class GameAccessibilityService : AccessibilityService() {
                 velocity > 0.02f -> "ПАДЕНИЕ"
                 else -> "ВЕРШИНА ДУГИ"
             }
-            screenStatus = "$phase • птица y=${d.birdY} • цель ${targetY.toInt()} • прогноз ${noTapPrediction.toInt()} • тап дал бы ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom"
+            screenStatus = "$phase • y=${d.birdY} • v=${"%.2f".format(velocity)} • t=${timeToPipe.toInt()}мс • без=${noTapPrediction.toInt()} • тап=${afterTapPrediction.toInt()} • окно=$safeTop..$safeBottom"
         }
     }
 
@@ -516,6 +529,7 @@ class GameAccessibilityService : AccessibilityService() {
         lastAutoTapAt = 0L
         previousObstacleX = -1
         previousObstacleAt = 0L
+        smoothedObstacleSpeed = 0f
         previousVerticalVelocity = 0f
         previousRawVerticalVelocity = 0f
         estimatedFlapVelocity = -0.55f
