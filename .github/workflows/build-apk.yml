@@ -4,7 +4,7 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -22,7 +22,17 @@ jobs:
           gradle-version: "8.9"
       - name: Build debug APK
         run: gradle assembleDebug
-      - name: Upload APK
+      - name: Publish public APK download
+        run: |
+          mkdir -p /tmp/bird-play-release
+          cp app/build/outputs/apk/debug/app-debug.apk /tmp/bird-play-release/Bird-Play.apk
+          git checkout --orphan apk-download
+          git rm -rf . || true
+          cp /tmp/bird-play-release/Bird-Play.apk ./Bird-Play.apk
+          git add Bird-Play.apk
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "Publish Bird Play APK"
+          git push --force origin apk-download
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Bird-Play-debug
