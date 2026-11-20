@@ -58,7 +58,7 @@ class OverlayService : Service() {
         }
 
         status = TextView(this).apply {
-            text = "⠿ BIRD PLAY\nСчёт: — • Ожидание"
+            text = "⠿ BIRD PLAY\nИгровое поле: ожидание"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 11f
             maxWidth = dp(168)
@@ -164,9 +164,8 @@ class OverlayService : Service() {
 
     private fun refresh() {
         val state = if (GameAccessibilityService.monitoring) "МОНИТОРИНГ" else "ПАУЗА"
-        val score = GameAccessibilityService.lastScoreCandidate
-        val detail = GameAccessibilityService.screenStatus.take(28)
-        status?.text = "⠿ BIRD PLAY • $state\nСчёт: $score • Авто: выкл.\n$detail"
+        val detail = GameAccessibilityService.screenStatus.take(38)
+        status?.text = "⠿ BIRD PLAY • $state\\nИгровое поле: ${GameAccessibilityService.lastFrameWidth}×${GameAccessibilityService.lastFrameHeight}\\n$detail\\nГромкость −: СТОП"
     }
 
     override fun onDestroy() {
