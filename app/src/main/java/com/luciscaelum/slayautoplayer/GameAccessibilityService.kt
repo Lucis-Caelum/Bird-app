@@ -10,6 +10,7 @@ import android.hardware.HardwareBuffer
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
@@ -21,10 +22,13 @@ class GameAccessibilityService : AccessibilityService() {
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val scanInFlight = AtomicBoolean(false)
+    private var previousBirdY = -1
+    private var previousBirdAt = 0L
+    private var lastAutoTapAt = 0L
     private val monitorTask = object : Runnable {
         override fun run() {
             if (monitoring && !paused && !manual) captureScreenInternal()
-            if (monitoring) mainHandler.postDelayed(this, 350)
+            if (monitoring) mainHandler.postDelayed(this, 220)
         }
     }
 
@@ -34,8 +38,8 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "Служба подключена"
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-    override fun onInterrupt() { stopMonitoring("Остановлено системой") }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) { if (monitoring && !paused && !manual && !scanInFlight.get()) { mainHandler.removeCallbacks(monitorTask); mainHandler.post(monitorTask) } }
+    override fun onInterrupt() { screenStatus = "Служба временно прервана; ожидаю продолжения" }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_VOLUME_DOWN &&
@@ -75,6 +79,7 @@ class GameAccessibilityService : AccessibilityService() {
                     full.recycle()
 
                     val detection = detectPlayfield(field)
+                    handleAutoControl(detection, field.width, top, full.width, full.height)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
                     lastBirdX = detection.birdX
@@ -130,7 +135,7 @@ class GameAccessibilityService : AccessibilityService() {
                 // Bird marker: blue jacket, but only in the expected left-side bird zone.
                 if (x in (w * 0.12f).toInt()..(w * 0.46f).toInt() &&
                     y in (h * 0.20f).toInt()..(h * 0.82f).toInt() &&
-                    b > 85 && b > r * 1.12 && b > green * 1.03) {
+                    b > 42 && b > r * 1.20 && b > green * 1.05 && r < 115 && green < 145) {
                     blueColumns[x]++
                     blueRows[y]++
                 }
@@ -248,7 +253,10 @@ class GameAccessibilityService : AccessibilityService() {
         manual = false
         paused = false
         monitoring = true
-        screenStatus = "Мониторинг запущен • громкость − = СТОП"
+        previousBirdY = -1
+        previousBirdAt = 0L
+        lastAutoTapAt = 0L
+        screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
         mainHandler.post(monitorTask)
     }
