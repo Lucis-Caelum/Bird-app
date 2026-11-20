@@ -416,18 +416,22 @@ class GameAccessibilityService : AccessibilityService() {
         val predictedY = d.birdY + velocity * timeToPipe + 0.5f * gravity * timeToPipe * timeToPipe
         val error = predictedY - targetY
         val distanceWindow = distance in 0f..(fieldWidth * 1.35f)
-        val deadBand = gapHeight * 0.075f
+        // Use a wider neutral band to avoid chasing tiny detector fluctuations.
+        val deadBand = gapHeight * 0.13f
 
-        // Repeated pulses are allowed while the predicted crossing point remains below target.
-        // Once the bird is rising fast enough, the velocity term predicts the recovery and pauses taps.
-        val needsLift = error > deadBand && (velocity > -0.20f || error > gapHeight * 0.24f)
-        val tapCooldown = if (error > gapHeight * 0.30f) 125L else 165L
-        if (distanceWindow && needsLift && now - lastAutoTapAt >= tapCooldown) {
+        // One flap is a discrete impulse. Do not stack another flap while the previous
+        // impulse is still lifting the avatar; re-evaluate only after its effect is visible.
+        // In particular, a large position error must NOT bypass this recovery lock.
+        val recoveryLockMs = 340L
+        val stillRecoveringFromTap = lastAutoTapAt > 0L && now - lastAutoTapAt < recoveryLockMs
+        val needsLift = error > deadBand && velocity > -0.075f
+        val tapCooldown = 340L
+        if (distanceWindow && needsLift && !stillRecoveringFromTap && now - lastAutoTapAt >= tapCooldown) {
             lastAutoTapAt = now
-            screenStatus = "КОРРЕКЦИЯ • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
+            screenStatus = "ОДИНОЧНЫЙ ИМПУЛЬС • прогноз ${predictedY.toInt()} / цель ${targetY.toInt()} • ошибка ${error.toInt()} • v ${"%.2f".format(velocity)}"
             tap(tapX, tapY)
         } else {
-            screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}"
+            screenStatus = "ПТИЦА y=${d.birdY} • G ${d.gapTop}..${d.gapBottom} • цель ${targetY.toInt()} • прогноз ${predictedY.toInt()} • v ${"%.2f".format(velocity)}" + if (stillRecoveringFromTap) " • жду эффект касания" else ""
         }
     }
 
