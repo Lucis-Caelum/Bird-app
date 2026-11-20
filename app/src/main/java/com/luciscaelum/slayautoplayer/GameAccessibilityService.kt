@@ -215,6 +215,31 @@ class GameAccessibilityService : AccessibilityService() {
         )
     }
 
+    private fun handleAutoControl(d: Detection, fieldWidth: Int, cropTop: Int, screenWidth: Int, screenHeight: Int) {
+        if (!monitoring || paused || manual) return
+        val now = SystemClock.elapsedRealtime()
+        val active = d.birdX >= 0 && d.birdY >= 0 && d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
+        if (!active) { previousBirdY = -1; previousBirdAt = 0L; return }
+        val gapCenter = (d.gapTop + d.gapBottom) / 2f
+        val gapHeight = (d.gapBottom - d.gapTop).toFloat()
+        val velocity = if (previousBirdY >= 0 && previousBirdAt > 0L) (d.birdY - previousBirdY).toFloat() / (now - previousBirdAt).coerceAtLeast(1L) else 0f
+        previousBirdY = d.birdY
+        previousBirdAt = now
+        val predictedY = d.birdY + velocity * 130f
+        val targetY = gapCenter - gapHeight * 0.10f
+        if (predictedY > targetY + gapHeight * 0.12f && now - lastAutoTapAt >= 190L) {
+            val sx = resources.displayMetrics.widthPixels.toFloat() / screenWidth.coerceAtLeast(1)
+            val sy = resources.displayMetrics.heightPixels.toFloat() / screenHeight.coerceAtLeast(1)
+            val tx = (d.birdX * sx).coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
+            val ty = ((d.birdY + cropTop) * sy).coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
+            lastAutoTapAt = now
+            tap(tx, ty)
+            screenStatus = "АВТОКЛИК • птица y=" + d.birdY + " • просвет " + d.gapTop + "–" + d.gapBottom
+        } else {
+            screenStatus = "ИГРА • птица y=" + d.birdY + " • труба x=" + d.obstacleX + " • просвет " + d.gapTop + "–" + d.gapBottom
+        }
+    }
+
     private fun startMonitoringInternal() {
         if (instance == null) {
             screenStatus = "Включи службу специальных возможностей"
