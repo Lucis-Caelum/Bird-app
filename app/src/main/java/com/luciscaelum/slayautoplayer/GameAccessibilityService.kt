@@ -29,6 +29,11 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
     private var lastSceneSeenAt = 0L
+    private var lastCaptureStartedAt = 0L
+    private var wasActiveGame = false
+    private val eventScanTask = Runnable {
+        if (monitoring && !paused && !manual) captureScreenInternal()
+    }
     private val monitorTask = object : Runnable {
         override fun run() {
             if (monitoring && !paused && !manual) captureScreenInternal()
@@ -42,7 +47,17 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "Служба подключена"
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) { /* Fixed-rate capture avoids Android screenshot throttling. */ }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (!monitoring || paused || manual || event == null) return
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastCaptureStartedAt >= 650L) {
+            mainHandler.removeCallbacks(eventScanTask)
+            mainHandler.postDelayed(eventScanTask, 90L)
+        }
+    }
     override fun onInterrupt() { screenStatus = "Служба временно прервана; ожидаю продолжения" }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
@@ -61,8 +76,9 @@ class GameAccessibilityService : AccessibilityService() {
             return
         }
         val now = SystemClock.elapsedRealtime()
-        if (now < nextScreenshotAllowedAt) return
+        if (now < nextScreenshotAllowedAt || now - lastCaptureStartedAt < 650L) return
         if (!scanInFlight.compareAndSet(false, true)) return
+        lastCaptureStartedAt = now
         nextScreenshotAllowedAt = now + screenshotIntervalMs
         screenStatus = "Считываю игровое поле…"
         try {
@@ -89,6 +105,17 @@ class GameAccessibilityService : AccessibilityService() {
 
                     screenshotIntervalMs = 650L
                     val detection = detectPlayfield(field)
+                    if (detection.activeGame && !wasActiveGame) {
+                        previousBirdY = -1
+                        previousBirdAt = 0L
+                        lastAutoTapAt = 0L
+                        screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
+                    } else if (!detection.activeGame && wasActiveGame) {
+                        previousBirdY = -1
+                        previousBirdAt = 0L
+                        screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
+                    }
+                    wasActiveGame = detection.activeGame
                     handleAutoControl(detection, field.width, field.height, top, screenW, screenH)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
@@ -300,6 +327,11 @@ class GameAccessibilityService : AccessibilityService() {
         if (!d.activeGame || d.birdX < 0 || d.birdY < 0) {
             previousBirdY = -1
             previousBirdAt = 0L
+            lastBirdX = -1
+            lastBirdY = -1
+            lastObstacleX = -1
+            lastGapTop = -1
+            lastGapBottom = -1
             screenStatus = d.message
             return
         }
@@ -357,12 +389,22 @@ class GameAccessibilityService : AccessibilityService() {
         manual = false
         paused = false
         monitoring = true
+        wasActiveGame = false
+        lastCaptureStartedAt = 0L
+        nextScreenshotAllowedAt = 0L
+        screenshotIntervalMs = 650L
+        lastBirdX = -1
+        lastBirdY = -1
+        lastObstacleX = -1
+        lastGapTop = -1
+        lastGapBottom = -1
         previousBirdY = -1
         previousBirdAt = 0L
         lastAutoTapAt = 0L
         lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
+        mainHandler.removeCallbacks(eventScanTask)
         mainHandler.post(monitorTask)
     }
 
@@ -371,6 +413,7 @@ class GameAccessibilityService : AccessibilityService() {
         paused = true
         manual = true
         mainHandler.removeCallbacks(monitorTask)
+        mainHandler.removeCallbacks(eventScanTask)
         screenStatus = reason
     }
 
