@@ -17,6 +17,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import android.text.TextUtils
 
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
@@ -48,7 +49,7 @@ class OverlayService : Service() {
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setPadding(dp(8), dp(7), dp(8), dp(7))
             background = GradientDrawable().apply {
                 setColor(0xB8222730.toInt())
                 cornerRadius = dp(16).toFloat()
@@ -57,10 +58,13 @@ class OverlayService : Service() {
         }
 
         status = TextView(this).apply {
-            text = "⠿  BIRD PLAY  •  READY\nСчёт: —\nАвтоуправление: следующий этап"
+            text = "⠿ BIRD PLAY\nСчёт: — • Ожидание"
             setTextColor(0xFFFFFFFF.toInt())
-            textSize = 13f
-            setPadding(dp(4), dp(4), dp(4), dp(10))
+            textSize = 11f
+            maxWidth = dp(168)
+            maxLines = 3
+            ellipsize = TextUtils.TruncateAt.END
+            setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
         }
         layout.addView(status)
@@ -68,9 +72,12 @@ class OverlayService : Service() {
         fun button(label: String, action: () -> Unit) {
             val item = Button(this).apply {
                 text = label
-                textSize = 12f
+                textSize = 10f
                 isAllCaps = false
-                alpha = 0.88f
+                minHeight = dp(32)
+                minimumHeight = dp(32)
+                setPadding(dp(4), 0, dp(4), 0)
+                alpha = 0.82f
                 setOnClickListener { action() }
             }
             layout.addView(item, LinearLayout.LayoutParams(
@@ -81,7 +88,7 @@ class OverlayService : Service() {
             })
         }
 
-        button("РАЗОВО СЧИТАТЬ СЧЁТ") {
+        button("СЧИТАТЬ СЧЁТ") {
             GameAccessibilityService.requestScreenScan()
             refresh()
         }
@@ -93,14 +100,17 @@ class OverlayService : Service() {
             GameAccessibilityService.manualTakeover()
             refresh()
         }
-        button("СТОП") { stopSelf() }
+        button("СТОП") {
+            GameAccessibilityService.manualTakeover()
+            stopSelf()
+        }
 
         val type = if (Build.VERSION.SDK_INT >= 26)
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            dp(184),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -153,10 +163,10 @@ class OverlayService : Service() {
     }
 
     private fun refresh() {
-        val state = if (GameAccessibilityService.monitoring) "MONITOR" else "PAUSE"
-        val text = GameAccessibilityService.lastOcrText
-        val preview = if (text.isBlank()) "" else "\nТекст: ${text.take(55)}"
-        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт (предварительно): ${GameAccessibilityService.lastScoreCandidate}\n${GameAccessibilityService.screenStatus}$preview\nАвтопилот: выключен"
+        val state = if (GameAccessibilityService.monitoring) "МОНИТОРИНГ" else "ПАУЗА"
+        val score = GameAccessibilityService.lastScoreCandidate
+        val detail = GameAccessibilityService.screenStatus.take(28)
+        status?.text = "⠿ BIRD PLAY • $state\nСчёт: $score • Авто: выкл.\n$detail"
     }
 
     override fun onDestroy() {
