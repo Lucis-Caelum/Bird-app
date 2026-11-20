@@ -149,7 +149,7 @@ class MediaProjectionCaptureService : Service() {
         const val EXTRA_RESULT_DATA = "birdplay.resultData"
         private const val CHANNEL_ID = "bird_play_capture"
         private const val NOTIFICATION_ID = 7321
-        private const val FRAME_INTERVAL_MS = 160L
+        private const val FRAME_INTERVAL_MS = 120L
         private const val PREVIEW_INTERVAL_MS = 450L
         private const val HEADER_CROP_FRACTION = 0.117f
     }
