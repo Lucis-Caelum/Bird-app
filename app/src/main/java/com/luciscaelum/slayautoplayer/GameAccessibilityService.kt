@@ -36,8 +36,9 @@ class GameAccessibilityService : AccessibilityService() {
     }
     private val monitorTask = object : Runnable {
         override fun run() {
-            if (monitoring && !paused && !manual) captureScreenInternal()
-            if (monitoring) mainHandler.postDelayed(this, 650)
+            if (monitoring && !paused && !manual && screenStatus.startsWith("АВТОПИЛОТ")) {
+                screenStatus = "ОЖИДАЮ ВИДЕОПОТОК MediaProjection"
+            }
         }
     }
 
@@ -52,11 +53,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (event.eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             event.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED) return
-        val now = SystemClock.elapsedRealtime()
-        if (now - lastCaptureStartedAt >= 650L) {
-            mainHandler.removeCallbacks(eventScanTask)
-            mainHandler.postDelayed(eventScanTask, 90L)
-        }
+        // Screen frames now arrive from MediaProjectionCaptureService.
     }
     override fun onInterrupt() { screenStatus = "Служба временно прервана; ожидаю продолжения" }
 
@@ -429,7 +426,7 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
         mainHandler.removeCallbacks(monitorTask)
         mainHandler.removeCallbacks(eventScanTask)
-        mainHandler.post(monitorTask)
+        screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • ожидаю MediaProjection • громкость − = СТОП"
     }
 
     private fun stopMonitoring(reason: String = "Мониторинг остановлен") {
