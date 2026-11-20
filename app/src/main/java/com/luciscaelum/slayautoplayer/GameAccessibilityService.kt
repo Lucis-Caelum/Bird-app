@@ -309,10 +309,10 @@ class GameAccessibilityService : AccessibilityService() {
             val falling = velocity > 0.025f
             if (d.birdY > supportLine && falling && now - lastAutoTapAt >= 360L) {
                 lastAutoTapAt = now
-                screenStatus = "ПОДДЕРЖКА ДО ТРУБ • y=\${d.birdY} • v=\${"%.2f".format(velocity)}"
+                screenStatus = "ПОДДЕРЖКА ДО ТРУБ • y=${d.birdY}"
                 tap(tapX, tapY)
             } else {
-                screenStatus = "ИГРА • персонаж y=\${d.birdY} • ожидаю первые трубы"
+                screenStatus = "ИГРА • персонаж y=${d.birdY} • ожидаю первые трубы"
             }
             return
         }
@@ -328,10 +328,10 @@ class GameAccessibilityService : AccessibilityService() {
 
         if (approaching && tooLow && descending && now - lastAutoTapAt >= 360L) {
             lastAutoTapAt = now
-            screenStatus = "АВТОКЛИК • bird=\${d.birdY} • gap=\${d.gapTop}..\${d.gapBottom}"
+            screenStatus = "АВТОКЛИК • bird=${d.birdY} • gap=${d.gapTop}..${d.gapBottom}"
             tap(tapX, tapY)
         } else {
-            screenStatus = "ПТИЦА y=\${d.birdY} • ТРУБА x=\${d.obstacleX} • ПРОХОД \${d.gapTop}..\${d.gapBottom}"
+            screenStatus = "ПТИЦА y=${d.birdY} • ТРУБА x=${d.obstacleX} • ПРОХОД ${d.gapTop}..${d.gapBottom}"
         }
     }
 
