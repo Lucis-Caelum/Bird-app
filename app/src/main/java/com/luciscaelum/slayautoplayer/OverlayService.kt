@@ -98,6 +98,7 @@ class OverlayService : Service() {
         }
         button("СТОП") {
             GameAccessibilityService.manualTakeover()
+            stopService(Intent(this, MediaProjectionCaptureService::class.java))
             stopSelf()
         }
 
