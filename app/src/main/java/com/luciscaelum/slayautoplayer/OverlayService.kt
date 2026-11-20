@@ -57,7 +57,7 @@ class OverlayService : Service() {
         }
 
         status = TextView(this).apply {
-            text = "⠿  BIRD PLAY  •  READY\nСчёт: —\nАвтопилот: выключен"
+            text = "⠿  BIRD PLAY  •  READY\nСчёт: —\nАвтоуправление: следующий этап"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 13f
             setPadding(dp(4), dp(4), dp(4), dp(10))
@@ -81,11 +81,11 @@ class OverlayService : Service() {
             })
         }
 
-        button("СЧИТАТЬ ЭКРАН") {
+        button("РАЗОВО СЧИТАТЬ СЧЁТ") {
             GameAccessibilityService.requestScreenScan()
             refresh()
         }
-        button("ПАУЗА / ПРОДОЛЖИТЬ") {
+        button("МОНИТОРИНГ / ПАУЗА") {
             GameAccessibilityService.togglePause()
             refresh()
         }
@@ -153,10 +153,10 @@ class OverlayService : Service() {
     }
 
     private fun refresh() {
-        val state = if (GameAccessibilityService.paused) "PAUSE" else "READY"
+        val state = if (GameAccessibilityService.monitoring) "MONITOR" else "PAUSE"
         val text = GameAccessibilityService.lastOcrText
         val preview = if (text.isBlank()) "" else "\nТекст: ${text.take(55)}"
-        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт-кандидат: ${GameAccessibilityService.lastScoreCandidate}\n${GameAccessibilityService.screenStatus}$preview\nАвтопилот: выключен"
+        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт (предварительно): ${GameAccessibilityService.lastScoreCandidate}\n${GameAccessibilityService.screenStatus}$preview\nАвтопилот: выключен"
     }
 
     override fun onDestroy() {
