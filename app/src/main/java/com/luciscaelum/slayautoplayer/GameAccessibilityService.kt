@@ -104,35 +104,115 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private data class Detection(val birdX: Int = -1, val birdY: Int = -1, val obstacleX: Int = -1, val gapTop: Int = -1, val gapBottom: Int = -1, val message: String)
-    // Diagnostic-only color detector. It never sends taps.
+    // Conservative diagnostic detector: do not call menu artwork a bird.
+    // A scene is considered gameplay only when a paired pipe gap is visible.
     private fun detectPlayfield(bitmap: Bitmap): Detection {
-        val w = bitmap.width; val h = bitmap.height; val step = 3
-        val xCounts = IntArray(w); val blueX = IntArray(w); val blueY = IntArray(h)
-        for (y in 0 until h step step) for (x in 0 until w step step) {
-            val c = bitmap.getPixel(x, y); val r = (c shr 16) and 255; val g = (c shr 8) and 255; val b = c and 255
-            if (r in 55..190 && b in 55..190 && g < 105 && r > g * 1.25 && b > g * 1.25) xCounts[x]++
-            if (b > 85 && b > r * 1.12 && b > g * 1.03 && x < w * 0.58f) { blueX[x]++; blueY[y]++ }
-        }
-        val startX = (w * 0.52f).toInt(); val endX = (w * 0.99f).toInt()
-        var obstacleX = -1; var maxCount = 0
-        for (x in startX until endX step step) if (xCounts[x] > maxCount) { maxCount = xCounts[x]; obstacleX = x }
-        val xs = blueX.indices.filter { blueX[it] >= 3 }; val ys = blueY.indices.filter { blueY[it] >= 3 }
-        val birdX = if (xs.isEmpty()) -1 else (xs.first() + xs.last()) / 2
-        val birdY = if (ys.isEmpty()) -1 else (ys.first() + ys.last()) / 2
-        if (obstacleX < 0 || maxCount < 8) return Detection(birdX, birdY, message = if (birdY >= 0) "Птица-кандидат найдена; трубы не распознаны" else "Ищу птицу и трубы…")
-        val occupancy = IntArray(h)
+        val w = bitmap.width
+        val h = bitmap.height
+        val step = 3
+        val purpleColumns = IntArray(w)
+        val blueColumns = IntArray(w)
+        val blueRows = IntArray(h)
+
         for (y in 0 until h step step) {
-            var count = 0; val left = max(0, obstacleX - step * 2); val right = min(w, obstacleX + step * 3)
-            for (x in left until right step step) { val c = bitmap.getPixel(x,y); val r=(c shr 16) and 255; val g=(c shr 8) and 255; val b=c and 255; if (r in 55..190 && b in 55..190 && g < 105 && r > g*1.25 && b > g*1.25) count++ }
-            occupancy[y] = count
+            for (x in 0 until w step step) {
+                val c = bitmap.getPixel(x, y)
+                val r = (c shr 16) and 255
+                val green = (c shr 8) and 255
+                val b = c and 255
+
+                // Rock/purple pipe body. Restrict to the right side of the playfield.
+                if (x > w * 0.52f && r in 55..190 && b in 55..190 &&
+                    green < 105 && r > green * 1.25 && b > green * 1.25) {
+                    purpleColumns[x]++
+                }
+
+                // Bird marker: blue jacket, but only in the expected left-side bird zone.
+                if (x in (w * 0.12f).toInt()..(w * 0.46f).toInt() &&
+                    y in (h * 0.20f).toInt()..(h * 0.82f).toInt() &&
+                    b > 85 && b > r * 1.12 && b > green * 1.03) {
+                    blueColumns[x]++
+                    blueRows[y]++
+                }
+            }
         }
-        val runs = mutableListOf<Pair<Int,Int>>(); var runStart = -1
-        for (y in 0 until h step step) { if (occupancy[y] >= 1) { if (runStart < 0) runStart = y } else if (runStart >= 0) { if (y-runStart >= h*0.045f) runs.add(runStart to y); runStart = -1 } }
-        if (runStart >= 0 && h-runStart >= h*0.045f) runs.add(runStart to h)
-        if (runs.size < 2) return Detection(birdX,birdY,obstacleX,message="Препятствие-кандидат x=$obstacleX; ищу просвет")
-        var gapTop = -1; var gapBottom = -1; var largest = 0
-        for (i in 0 until runs.size-1) { val gap = runs[i+1].first-runs[i].second; if (gap > largest) { largest=gap; gapTop=runs[i].second; gapBottom=runs[i+1].first } }
-        return Detection(birdX,birdY,obstacleX,gapTop,gapBottom,"Кандидаты: птица y=$birdY • труба x=$obstacleX • просвет $gapTop–$gapBottom")
+
+        var obstacleX = -1
+        var maxCount = 0
+        for (x in (w * 0.52f).toInt() until (w * 0.99f).toInt() step step) {
+            if (purpleColumns[x] > maxCount) {
+                maxCount = purpleColumns[x]
+                obstacleX = x
+            }
+        }
+
+        val occupancy = IntArray(h)
+        if (obstacleX >= 0 && maxCount >= 8) {
+            for (y in 0 until h step step) {
+                var count = 0
+                val left = max(0, obstacleX - step * 2)
+                val right = min(w, obstacleX + step * 3)
+                for (x in left until right step step) {
+                    val c = bitmap.getPixel(x, y)
+                    val r = (c shr 16) and 255
+                    val green = (c shr 8) and 255
+                    val b = c and 255
+                    if (r in 55..190 && b in 55..190 && green < 105 &&
+                        r > green * 1.25 && b > green * 1.25) count++
+                }
+                occupancy[y] = count
+            }
+        }
+
+        val runs = mutableListOf<Pair<Int, Int>>()
+        var runStart = -1
+        for (y in 0 until h step step) {
+            if (occupancy[y] >= 1) {
+                if (runStart < 0) runStart = y
+            } else if (runStart >= 0) {
+                if (y - runStart >= h * 0.045f) runs.add(runStart to y)
+                runStart = -1
+            }
+        }
+        if (runStart >= 0 && h - runStart >= h * 0.045f) runs.add(runStart to h)
+
+        var gapTop = -1
+        var gapBottom = -1
+        var largestGap = 0
+        for (i in 0 until runs.size - 1) {
+            val gap = runs[i + 1].first - runs[i].second
+            if (gap > largestGap) {
+                largestGap = gap
+                gapTop = runs[i].second
+                gapBottom = runs[i + 1].first
+            }
+        }
+
+        // Reject menu/character-selection screens: they may contain blue clothing,
+        // but they do not contain two pipe bodies separated by a plausible opening.
+        val validPipePair = runs.size >= 2 &&
+            largestGap in (h * 0.10f).toInt()..(h * 0.58f).toInt() &&
+            obstacleX > (w * 0.52f).toInt()
+        if (!validPipePair) {
+            return Detection(
+                message = if (obstacleX >= 0) "Меню/заставка или трубы не подтверждены — жду игру"
+                else "Жду игровую сцену: пара труб пока не найдена"
+            )
+        }
+
+        val xs = blueColumns.indices.filter { blueColumns[it] >= 3 }
+        val ys = blueRows.indices.filter { blueRows[it] >= 3 }
+        if (xs.isEmpty() || ys.isEmpty()) {
+            return Detection(obstacleX = obstacleX, gapTop = gapTop, gapBottom = gapBottom,
+                message = "Трубы и просвет найдены; ищу птицу")
+        }
+
+        val birdX = (xs.first() + xs.last()) / 2
+        val birdY = (ys.first() + ys.last()) / 2
+        return Detection(
+            birdX, birdY, obstacleX, gapTop, gapBottom,
+            "Игровая сцена: птица-кандидат x=$birdX y=$birdY • просвет $gapTop–$gapBottom"
+        )
     }
 
     private fun startMonitoringInternal() {
