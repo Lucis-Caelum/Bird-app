@@ -9,35 +9,79 @@ import android.provider.Settings
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 
 class MainActivity : Activity() {
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply {
+
+        val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 32, 28, 24)
+            setPadding(dp(22), dp(28), dp(22), dp(24))
         }
-        root.addView(TextView(this).apply {
-            text = "Bird Play 0.1\\n\\nПервый тестовый APK: плавающая панель и базовое управление. Автопилот пока выключен — сначала нужна калибровка под фактическую картинку игры."
-            textSize = 18f
+
+        content.addView(TextView(this).apply {
+            text = "Bird Play 0.2"
+            textSize = 26f
         })
+
+        content.addView(TextView(this).apply {
+            text = "Сначала настрой разрешения, затем запусти плавающую панель. Автопилот пока выключен — это тест интерфейса и управления."
+            textSize = 15f
+            setPadding(0, dp(10), 0, dp(8))
+        })
+
         fun addButton(label: String, action: () -> Unit) {
-            root.addView(Button(this).apply { text = label; setOnClickListener { action() } },
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            val button = Button(this).apply {
+                text = label
+                textSize = 14f
+                isAllCaps = false
+                setOnClickListener { action() }
+            }
+            content.addView(button, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                topMargin = dp(10)
+            })
         }
-        addButton("1. Разрешить отображение поверх окон") {
+
+        addButton("1. Разрешение поверх окон") {
             if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
                 startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            } else {
+                Toast.makeText(this, "Разрешение уже включено", Toast.LENGTH_SHORT).show()
             }
         }
-        addButton("2. Включить службу управления") {
+
+        addButton("2. Включить службу специальных возможностей") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }
+
         addButton("3. Показать плавающую панель") {
-            startService(Intent(this, OverlayService::class.java))
+            if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this)) {
+                Toast.makeText(this, "Сначала включи разрешение «Поверх других окон»", Toast.LENGTH_LONG).show()
+                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+            } else {
+                try {
+                    startService(Intent(this, OverlayService::class.java))
+                    Toast.makeText(this, "Запускаю плавающую панель", Toast.LENGTH_SHORT).show()
+                } catch (e: Exception) {
+                    Toast.makeText(this, "Не удалось запустить панель: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
-        addButton("Остановить панель") { stopService(Intent(this, OverlayService::class.java)) }
-        setContentView(root)
+
+        addButton("Остановить панель") {
+            stopService(Intent(this, OverlayService::class.java))
+            Toast.makeText(this, "Панель остановлена", Toast.LENGTH_SHORT).show()
+        }
+
+        val scroll = ScrollView(this).apply { addView(content) }
+        setContentView(scroll)
     }
 }
