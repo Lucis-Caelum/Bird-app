@@ -88,7 +88,7 @@ class OverlayService : Service() {
             })
         }
 
-        button("СЧИТАТЬ СЧЁТ") {
+        button("СНИМОК ПОЛЯ") {
             GameAccessibilityService.requestScreenScan()
             refresh()
         }
@@ -165,7 +165,7 @@ class OverlayService : Service() {
     private fun refresh() {
         val state = if (GameAccessibilityService.monitoring) "МОНИТОРИНГ" else "ПАУЗА"
         val detail = GameAccessibilityService.screenStatus.take(38)
-        status?.text = "⠿ BIRD PLAY • $state\\nИгровое поле: ${GameAccessibilityService.lastFrameWidth}×${GameAccessibilityService.lastFrameHeight}\\n$detail\\nГромкость −: СТОП"
+        status?.text = "⠿ BIRD PLAY • $state\nПоле: ${GameAccessibilityService.lastFrameWidth}×${GameAccessibilityService.lastFrameHeight}\n$detail\nГромкость −: СТОП"
     }
 
     override fun onDestroy() {
