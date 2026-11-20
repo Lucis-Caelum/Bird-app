@@ -107,16 +107,17 @@ class OverlayService : Service() {
         else WindowManager.LayoutParams.TYPE_PHONE
 
         val params = WindowManager.LayoutParams(
-            dp(132),
+            dp(116),
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
-        params.gravity = Gravity.TOP or Gravity.END
-        params.x = dp(12)
-        params.y = dp(110)
+        // Move away from the upper-right pipe lane; the old panel covered obstacles.
+        params.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        params.x = 0
+        params.y = dp(0)
 
         status?.setOnTouchListener(object : View.OnTouchListener {
             private var downRawX = 0f
@@ -165,7 +166,8 @@ class OverlayService : Service() {
         val bird = "P ${GameAccessibilityService.lastBirdX},${GameAccessibilityService.lastBirdY}"
         val pipe = "T ${GameAccessibilityService.lastObstacleX}"
         val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
-        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap • VOL− STOP"
+        val tap = GameAccessibilityService.lastTapStatus
+        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap • $tap • VOL− STOP"
     }
 
     override fun onDestroy() {
