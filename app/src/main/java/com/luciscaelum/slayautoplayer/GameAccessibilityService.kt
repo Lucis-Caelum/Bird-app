@@ -8,6 +8,7 @@ import android.hardware.HardwareBuffer
 import android.os.Build
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
+import android.widget.Toast
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -34,6 +35,7 @@ class GameAccessibilityService : AccessibilityService() {
             return
         }
         screenStatus = "Получаю снимок экрана…"
+        try {
         takeScreenshot(
             Display.DEFAULT_DISPLAY,
             screenshotExecutor,
@@ -67,10 +69,17 @@ class GameAccessibilityService : AccessibilityService() {
                             } else {
                                 "Экран прочитан"
                             }
+                            val resultMessage = if (recognized.isBlank()) {
+                                "Bird Play: снимок получен, текст не найден"
+                            } else {
+                                "Bird Play: экран прочитан. Число: " + lastScoreCandidate + ". Текст: " + recognized.take(150)
+                            }
+                            Toast.makeText(applicationContext, resultMessage, Toast.LENGTH_LONG).show()
                             bitmap.recycle()
                         }
                         .addOnFailureListener {
                             screenStatus = "Снимок есть, но распознавание текста не удалось"
+                            Toast.makeText(applicationContext, "Bird Play: не удалось распознать текст на снимке", Toast.LENGTH_LONG).show()
                             bitmap.recycle()
                         }
                 }
@@ -82,9 +91,14 @@ class GameAccessibilityService : AccessibilityService() {
                         3 -> "Слишком часто: подожди секунду"
                         else -> "Ошибка снимка экрана ($errorCode)"
                     }
+                    Toast.makeText(applicationContext, "Bird Play: " + screenStatus, Toast.LENGTH_LONG).show()
                 }
             }
         )
+        } catch (e: Exception) {
+            screenStatus = "Ошибка запуска снимка: " + e.javaClass.simpleName
+            Toast.makeText(applicationContext, "Bird Play: " + screenStatus, Toast.LENGTH_LONG).show()
+        }
     }
 
     fun tap(x: Float, y: Float, done: (() -> Unit)? = null) {
