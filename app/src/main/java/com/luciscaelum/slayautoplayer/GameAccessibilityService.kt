@@ -175,6 +175,8 @@ class GameAccessibilityService : AccessibilityService() {
             previousRawVerticalVelocity = 0f
             estimatedFlapVelocity = -0.55f
             tapObservationPendingAt = 0L
+            autoTapCount = 0
+            manualTapCount = 0
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             previousBirdY = -1
@@ -417,6 +419,7 @@ class GameAccessibilityService : AccessibilityService() {
             val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, -0.08f)
             estimatedFlapVelocity = (estimatedFlapVelocity * 0.25f + manualFlapVelocity * 0.75f)
                 .coerceIn(-2.5f, -0.08f)
+            manualTapCount++
         }
         previousBirdY = d.birdY
         previousBirdAt = now
@@ -437,6 +440,7 @@ class GameAccessibilityService : AccessibilityService() {
                 if (tap(tapX, tapY)) {
                     lastAutoTapAt = now
                     tapObservationPendingAt = now
+                    autoTapCount++
                 }
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
@@ -495,6 +499,7 @@ class GameAccessibilityService : AccessibilityService() {
             if (tap(tapX, tapY)) {
                 lastAutoTapAt = now
                 tapObservationPendingAt = now
+                autoTapCount++
             }
         } else {
             val phase = when {
@@ -601,6 +606,8 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var screenStatus = "Служба не подключена"
         @Volatile var lastFrameWidth = 0
         @Volatile var lastDetectionMs = 0L
+        @Volatile var autoTapCount = 0
+        @Volatile var manualTapCount = 0
         @Volatile var lastFrameHeight = 0
         @Volatile var lastBirdX = -1
         @Volatile var lastBirdY = -1
