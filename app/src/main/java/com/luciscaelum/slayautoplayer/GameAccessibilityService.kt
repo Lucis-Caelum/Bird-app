@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
 import android.graphics.Path
+import kotlin.math.max
+import kotlin.math.min
 import android.hardware.HardwareBuffer
 import android.os.Build
 import android.os.Handler
@@ -72,12 +74,16 @@ class GameAccessibilityService : AccessibilityService() {
                     val field = Bitmap.createBitmap(full, 0, top, full.width, full.height - top)
                     full.recycle()
 
-                    // Temporary frame-capture stage: image analysis/controller comes next.
-                    // Do not run OCR; game score and Mini App title are irrelevant.
+                    val detection = detectPlayfield(field)
                     lastFrameWidth = field.width
                     lastFrameHeight = field.height
+                    lastBirdX = detection.birdX
+                    lastBirdY = detection.birdY
+                    lastObstacleX = detection.obstacleX
+                    lastGapTop = detection.gapTop
+                    lastGapBottom = detection.gapBottom
                     field.recycle()
-                    screenStatus = "Игровое поле захвачено • детектор ещё не включён"
+                    screenStatus = detection.message
                     scanInFlight.set(false)
                 }
 
@@ -95,6 +101,38 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = "Ошибка снимка: " + e.javaClass.simpleName
             scanInFlight.set(false)
         }
+    }
+
+    private data class Detection(val birdX: Int = -1, val birdY: Int = -1, val obstacleX: Int = -1, val gapTop: Int = -1, val gapBottom: Int = -1, val message: String)
+    // Diagnostic-only color detector. It never sends taps.
+    private fun detectPlayfield(bitmap: Bitmap): Detection {
+        val w = bitmap.width; val h = bitmap.height; val step = 3
+        val xCounts = IntArray(w); val blueX = IntArray(w); val blueY = IntArray(h)
+        for (y in 0 until h step step) for (x in 0 until w step step) {
+            val c = bitmap.getPixel(x, y); val r = (c shr 16) and 255; val g = (c shr 8) and 255; val b = c and 255
+            if (r in 55..190 && b in 55..190 && g < 105 && r > g * 1.25 && b > g * 1.25) xCounts[x]++
+            if (b > 85 && b > r * 1.12 && b > g * 1.03 && x < w * 0.58f) { blueX[x]++; blueY[y]++ }
+        }
+        val startX = (w * 0.52f).toInt(); val endX = (w * 0.99f).toInt()
+        var obstacleX = -1; var maxCount = 0
+        for (x in startX until endX step step) if (xCounts[x] > maxCount) { maxCount = xCounts[x]; obstacleX = x }
+        val xs = blueX.indices.filter { blueX[it] >= 3 }; val ys = blueY.indices.filter { blueY[it] >= 3 }
+        val birdX = if (xs.isEmpty()) -1 else (xs.first() + xs.last()) / 2
+        val birdY = if (ys.isEmpty()) -1 else (ys.first() + ys.last()) / 2
+        if (obstacleX < 0 || maxCount < 8) return Detection(birdX, birdY, message = if (birdY >= 0) "Птица-кандидат найдена; трубы не распознаны" else "Ищу птицу и трубы…")
+        val occupancy = IntArray(h)
+        for (y in 0 until h step step) {
+            var count = 0; val left = max(0, obstacleX - step * 2); val right = min(w, obstacleX + step * 3)
+            for (x in left until right step step) { val c = bitmap.getPixel(x,y); val r=(c shr 16) and 255; val g=(c shr 8) and 255; val b=c and 255; if (r in 55..190 && b in 55..190 && g < 105 && r > g*1.25 && b > g*1.25) count++ }
+            occupancy[y] = count
+        }
+        val runs = mutableListOf<Pair<Int,Int>>(); var runStart = -1
+        for (y in 0 until h step step) { if (occupancy[y] >= 1) { if (runStart < 0) runStart = y } else if (runStart >= 0) { if (y-runStart >= h*0.045f) runs.add(runStart to y); runStart = -1 } }
+        if (runStart >= 0 && h-runStart >= h*0.045f) runs.add(runStart to h)
+        if (runs.size < 2) return Detection(birdX,birdY,obstacleX,message="Препятствие-кандидат x=$obstacleX; ищу просвет")
+        var gapTop = -1; var gapBottom = -1; var largest = 0
+        for (i in 0 until runs.size-1) { val gap = runs[i+1].first-runs[i].second; if (gap > largest) { largest=gap; gapTop=runs[i].second; gapBottom=runs[i+1].first } }
+        return Detection(birdX,birdY,obstacleX,gapTop,gapBottom,"Кандидаты: птица y=$birdY • труба x=$obstacleX • просвет $gapTop–$gapBottom")
     }
 
     private fun startMonitoringInternal() {
@@ -146,6 +184,11 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var screenStatus = "Служба не подключена"
         @Volatile var lastFrameWidth = 0
         @Volatile var lastFrameHeight = 0
+        @Volatile var lastBirdX = -1
+        @Volatile var lastBirdY = -1
+        @Volatile var lastObstacleX = -1
+        @Volatile var lastGapTop = -1
+        @Volatile var lastGapBottom = -1
         @Volatile private var instance: GameAccessibilityService? = null
 
         fun togglePause() {
