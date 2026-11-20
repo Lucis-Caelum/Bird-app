@@ -8,6 +8,8 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -18,6 +20,7 @@ class OverlayService : Service() {
     private lateinit var wm: WindowManager
     private var panel: LinearLayout? = null
     private var status: TextView? = null
+    private var windowParams: WindowManager.LayoutParams? = null
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
@@ -36,19 +39,20 @@ class OverlayService : Service() {
 
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(12), dp(10), dp(12), dp(10))
             background = GradientDrawable().apply {
-                setColor(0xF2222730.toInt())
+                setColor(0xB8222730.toInt())
                 cornerRadius = dp(16).toFloat()
-                setStroke(dp(1), 0xFF596273.toInt())
+                setStroke(dp(1), 0x99596273.toInt())
             }
         }
 
         status = TextView(this).apply {
-            text = "BIRD PLAY  •  READY\nСчёт: —\nАвтопилот: выключен"
+            text = "⠿  BIRD PLAY  •  READY\nСчёт: —\nАвтопилот: выключен"
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 14f
-            setPadding(dp(2), dp(2), dp(2), dp(8))
+            setPadding(dp(4), dp(4), dp(4), dp(10))
+            contentDescription = "Перетащи эту область, чтобы переместить панель"
         }
         layout.addView(status)
 
@@ -57,13 +61,14 @@ class OverlayService : Service() {
                 text = label
                 textSize = 12f
                 isAllCaps = false
+                alpha = 0.88f
                 setOnClickListener { action() }
             }
             layout.addView(item, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply {
-                topMargin = dp(6)
+                topMargin = dp(5)
             })
         }
 
@@ -93,9 +98,38 @@ class OverlayService : Service() {
         params.x = dp(12)
         params.y = dp(110)
 
+        // Drag the panel by holding the status/header area.
+        status?.setOnTouchListener(object : View.OnTouchListener {
+            private var downRawX = 0f
+            private var downRawY = 0f
+            private var startX = 0
+            private var startY = 0
+
+            override fun onTouch(view: View, event: MotionEvent): Boolean {
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        downRawX = event.rawX
+                        downRawY = event.rawY
+                        startX = params.x
+                        startY = params.y
+                        return true
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        params.x = (startX - (event.rawX - downRawX)).toInt()
+                        params.y = (startY + (event.rawY - downRawY)).toInt()
+                        try { wm.updateViewLayout(layout, params) } catch (_: Exception) {}
+                        return true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> return true
+                }
+                return false
+            }
+        })
+
         try {
             wm.addView(layout, params)
             panel = layout
+            windowParams = params
         } catch (e: Exception) {
             Toast.makeText(this, "Bird Play: не удалось показать панель — ${e.message}", Toast.LENGTH_LONG).show()
             stopSelf()
@@ -107,7 +141,7 @@ class OverlayService : Service() {
 
     private fun refresh() {
         val state = if (GameAccessibilityService.paused) "PAUSE" else "READY"
-        status?.text = "BIRD PLAY  •  $state\nСчёт: —\nАвтопилот: выключен"
+        status?.text = "⠿  BIRD PLAY  •  $state\nСчёт: —\nАвтопилот: выключен"
     }
 
     override fun onDestroy() {
@@ -115,6 +149,7 @@ class OverlayService : Service() {
             try { wm.removeView(it) } catch (_: Exception) {}
         }
         panel = null
+        windowParams = null
         super.onDestroy()
     }
 }
