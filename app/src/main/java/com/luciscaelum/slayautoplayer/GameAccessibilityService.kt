@@ -133,7 +133,7 @@ class GameAccessibilityService : AccessibilityService() {
             else if(groupStart>=0) { if(x-groupStart>=w*0.018f) groups.add(groupStart to x); groupStart=-1 }
         }
         if(groupStart>=0 && w-groupStart>=w*0.018f) groups.add(groupStart to w)
-        if(groups.isEmpty()) return Detection(message=if(birdFound) "Птица найдена; жду приближения труб" else "Жду активную игру и препятствия")
+        if(groups.isEmpty()) return Detection(if(birdFound) birdX else -1, if(birdFound) birdY else -1, message=if(birdFound) "ИГРА: персонаж y=$birdY • ожидаю появления труб" else "Жду активную игру и препятствия")
         val nearest=groups.first()
         val pipeX=(nearest.first+nearest.second)/2
         val sampleX=((nearest.first+nearest.second)/2).coerceIn(0,w-1)
@@ -160,28 +160,41 @@ class GameAccessibilityService : AccessibilityService() {
     private fun handleAutoControl(d:Detection,fieldWidth:Int,cropTop:Int,screenWidth:Int,screenHeight:Int) {
         if(!monitoring || paused || manual) return
         val now=SystemClock.elapsedRealtime()
-        val valid=d.birdX>=0 && d.birdY>=0 && d.obstacleX>d.birdX && d.gapTop>=0 && d.gapBottom>d.gapTop
-        if(!valid) { previousBirdY=-1; previousBirdAt=0L; screenStatus=d.message; return }
-        lastSceneSeenAt=now
-        val center=(d.gapTop+d.gapBottom)/2f
-        val gap=(d.gapBottom-d.gapTop).toFloat()
+        val birdVisible = d.birdX >= 0 && d.birdY >= 0
+        if (!birdVisible) {
+            previousBirdY = -1
+            previousBirdAt = 0L
+            screenStatus = d.message
+            return
+        }
+        val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
+        lastSceneSeenAt = now
         val velocity=if(previousBirdY>=0 && previousBirdAt>0L) (d.birdY-previousBirdY).toFloat()/(now-previousBirdAt).coerceAtLeast(1L) else 0f
         previousBirdY=d.birdY; previousBirdAt=now
+        val sx=resources.displayMetrics.widthPixels.toFloat()/screenWidth.coerceAtLeast(1)
+        val sy=resources.displayMetrics.heightPixels.toFloat()/screenHeight.coerceAtLeast(1)
+        val tx=(screenWidth*0.76f*sx).coerceIn(1f,resources.displayMetrics.widthPixels-1f)
+        val ty=((cropTop+(screenHeight-cropTop)*0.52f)*sy).coerceIn(1f,resources.displayMetrics.heightPixels-1f)
+        if (!hasGap) {
+            val stabiliseLine=(screenHeight-cropTop)*0.52f
+            if(d.birdY>stabiliseLine && now-lastAutoTapAt>=300L) {
+                lastAutoTapAt=now
+                tap(tx,ty)
+                screenStatus="ПОДДЕРЖКА ДО ТРУБ • персонаж y=${d.birdY}"
+            } else screenStatus="ПЕРСОНАЖ y=${d.birdY} • жду первых труб"
+            return
+        }
+        val center=(d.gapTop+d.gapBottom)/2f
+        val gap=(d.gapBottom-d.gapTop).toFloat()
         val distance=d.obstacleX-d.birdX
         val approach=distance in (fieldWidth*0.04f).toInt()..(fieldWidth*0.72f).toInt()
         val predicted=d.birdY+velocity*115f
         val target=center-gap*0.06f
-        if(approach && predicted>target+gap*0.08f && now-lastAutoTapAt>=250L) {
-            val sx=resources.displayMetrics.widthPixels.toFloat()/screenWidth.coerceAtLeast(1)
-            val sy=resources.displayMetrics.heightPixels.toFloat()/screenHeight.coerceAtLeast(1)
-            val tx=(d.birdX*sx).coerceIn(1f,resources.displayMetrics.widthPixels-1f)
-            val ty=((d.birdY+cropTop)*sy).coerceIn(1f,resources.displayMetrics.heightPixels-1f)
+        if(approach && predicted>target+gap*0.08f && now-lastAutoTapAt>=260L) {
             lastAutoTapAt=now
             tap(tx,ty)
-            screenStatus="АВТОКЛИК • y=${d.birdY} • проход ${d.gapTop}..${d.gapBottom}"
-        } else {
-            screenStatus="ИГРА • птица y=${d.birdY} • труба x=${d.obstacleX} • проход ${d.gapTop}..${d.gapBottom}"
-        }
+            screenStatus="АВТОКЛИК • птица y=${d.birdY} • проход ${d.gapTop}..${d.gapBottom}"
+        } else screenStatus="ИГРА • птица y=${d.birdY} • труба x=${d.obstacleX} • проход ${d.gapTop}..${d.gapBottom}"
     }
 
     private fun startMonitoringInternal() {
@@ -215,9 +228,16 @@ class GameAccessibilityService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, 45))
             .build()
-        dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) { done?.invoke() }
+        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                screenStatus = "КАСАНИЕ ДОСТАВЛЕНО"
+                done?.invoke()
+            }
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                screenStatus = "ANDROID ОТМЕНИЛ КАСАНИЕ"
+            }
         }, null)
+        if (!accepted) screenStatus = "ANDROID НЕ ПРИНЯЛ КАСАНИЕ"
     }
 
     override fun onDestroy() {
