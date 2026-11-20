@@ -41,6 +41,9 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousRawVerticalVelocity = 0f
     private var estimatedFlapVelocity = -0.55f
     private var tapObservationPendingAt = 0L
+    private val runLogLock = Any()
+    private val runLog = ArrayDeque<String>()
+    private var runStartedAt = 0L
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
     private val eventScanTask = Runnable {
@@ -178,8 +181,12 @@ class GameAccessibilityService : AccessibilityService() {
             tapObservationPendingAt = 0L
             autoTapCount = 0
             manualTapCount = 0
+            synchronized(runLogLock) { runLog.clear() }
+            runStartedAt = SystemClock.elapsedRealtime()
+            appendRunLog("=== НАЧАЛО ПОПЫТКИ ===")
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
+            appendRunLog("=== КОНЕЦ ПОПЫТКИ ===")
             previousBirdY = -1
             previousBirdAt = 0L
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
@@ -383,6 +390,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
         if (!d.activeGame || d.birdX < 0 || d.birdY < 0) {
+            appendRunLog("FRAME bird=${d.birdX},${d.birdY} pipe=${d.obstacleX} gap=${d.gapTop}..${d.gapBottom} state=NO_TRACK msg=${d.message}")
             previousBirdY = -1
             previousBirdAt = 0L
             previousObstacleX = -1
@@ -421,6 +429,7 @@ class GameAccessibilityService : AccessibilityService() {
             estimatedFlapVelocity = (estimatedFlapVelocity * 0.25f + manualFlapVelocity * 0.75f)
                 .coerceIn(-2.5f, -0.08f)
             manualTapCount++
+            appendRunLog("ACTION manual_tap_detected estimatedFlapV=${fmt(estimatedFlapVelocity)} count=$manualTapCount")
         }
         previousBirdY = d.birdY
         previousBirdAt = now
@@ -434,6 +443,7 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
+            appendRunLog("FRAME bird=${d.birdX},${d.birdY} v=${fmt(velocity)} pipe=${d.obstacleX} gap=NONE dt=${dt.toInt()}ms")
             // If pipe detection briefly drops out, keep a soft emergency guard.
             val guardY = fieldHeight * 0.78f
             if (d.birdY > guardY && velocity > 0.08f && now - lastAutoTapAt >= 120L) {
@@ -442,6 +452,7 @@ class GameAccessibilityService : AccessibilityService() {
                     lastAutoTapAt = now
                     tapObservationPendingAt = now
                     autoTapCount++
+                    appendRunLog("ACTION emergency_tap accepted y=${d.birdY} v=${fmt(velocity)}")
                 }
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
@@ -495,12 +506,16 @@ class GameAccessibilityService : AccessibilityService() {
         val shouldTap = distanceWindow && timeToPipe > reactionMs &&
             predictedTooLow && tapTrajectoryFits && tapImprovesPath
 
+        appendRunLog("FRAME bird=${d.birdY} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)} pipeX=${d.obstacleX} gap=${gapTop.toInt()}..${gapBottom.toInt()} dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} noTap=${noTapPrediction.toInt()} afterTap=${afterTapPrediction.toInt()} safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)} decision=" + if (shouldTap) "TAP" else "WAIT")
         if (shouldTap) {
             screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
             if (tap(tapX, tapY)) {
                 lastAutoTapAt = now
                 tapObservationPendingAt = now
                 autoTapCount++
+                appendRunLog("ACTION auto_tap accepted count=$autoTapCount")
+            } else {
+                appendRunLog("ACTION auto_tap rejected_or_busy")
             }
         } else {
             val phase = when {
@@ -571,23 +586,43 @@ class GameAccessibilityService : AccessibilityService() {
             val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
                     lastTapStatus = "TAP OK"
+                    appendRunLog("GESTURE completed")
                     screenStatus = "ANDROID: КАСАНИЕ ВЫПОЛНЕНО"
                     gestureInFlight.set(false)
                     done?.invoke()
                 }
                 override fun onCancelled(gestureDescription: GestureDescription?) {
                     lastTapStatus = "TAP CANCEL"
+                    appendRunLog("GESTURE cancelled")
                     screenStatus = "ANDROID: КАСАНИЕ ОТМЕНЕНО"
                     gestureInFlight.set(false)
                 }
             }, null)
             if (!accepted) {
                 lastTapStatus = "TAP REJECTED"
+                appendRunLog("GESTURE dispatch_rejected")
                 screenStatus = "ANDROID: ЖЕСТ НЕ ПРИНЯТ"
                 gestureInFlight.set(false)
             }
         }
         return true
+    }
+
+
+    private fun fmt(value: Float): String = String.format(java.util.Locale.US, "%.3f", value)
+
+    private fun appendRunLog(message: String) {
+        val elapsed = if (runStartedAt > 0L) SystemClock.elapsedRealtime() - runStartedAt else 0L
+        val line = "$elapsed ms | $message"
+        synchronized(runLogLock) {
+            if (runLog.size >= 1200) runLog.removeFirst()
+            runLog.addLast(line)
+        }
+    }
+
+    private fun exportRunLog(): String = synchronized(runLogLock) {
+        if (runLog.isEmpty()) "Лог пока пуст. Запусти игру с включённым автопилотом."
+        else runLog.joinToString(separator = "\n")
     }
 
     override fun onDestroy() {
@@ -617,6 +652,8 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastGapBottom = -1
         @Volatile var lastTapStatus = "TAP —"
         @Volatile private var instance: GameAccessibilityService? = null
+
+        fun getRunLog(): String = instance?.exportRunLog() ?: "Служба Bird Play не подключена."
 
         fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
             instance?.processCapturedFrame(field, cropTop, screenW, screenH)
