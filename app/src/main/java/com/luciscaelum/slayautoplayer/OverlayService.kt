@@ -62,7 +62,7 @@ class OverlayService : Service() {
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 8f
             maxWidth = dp(126)
-            maxLines = 3
+            maxLines = 4
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
@@ -160,8 +160,11 @@ class OverlayService : Service() {
 
     private fun refresh() {
         val state = if (GameAccessibilityService.monitoring) "МОНИТОРИНГ" else "ПАУЗА"
-        val detail = GameAccessibilityService.screenStatus.take(38)
-        status?.text = "⠿ BIRD PLAY • $state\nПоле: ${GameAccessibilityService.lastFrameWidth}×${GameAccessibilityService.lastFrameHeight}\n$detail\nГромкость −: СТОП"
+        val detail = GameAccessibilityService.screenStatus.take(54)
+        val bird = "P ${GameAccessibilityService.lastBirdX},${GameAccessibilityService.lastBirdY}"
+        val pipe = "T ${GameAccessibilityService.lastObstacleX}"
+        val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
+        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap • VOL− STOP"
     }
 
     override fun onDestroy() {
