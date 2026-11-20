@@ -88,7 +88,6 @@ class GameAccessibilityService : AccessibilityService() {
                     lastGapTop = detection.gapTop
                     lastGapBottom = detection.gapBottom
                     field.recycle()
-                    screenStatus = detection.message
                     scanInFlight.set(false)
                 }
 
@@ -224,7 +223,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
         val active = d.birdX >= 0 && d.birdY >= 0 && d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
-        if (!active) { previousBirdY = -1; previousBirdAt = 0L; return }
+        if (!active) { previousBirdY = -1; previousBirdAt = 0L; screenStatus = d.message; return }
         val gapCenter = (d.gapTop + d.gapBottom) / 2f
         val gapHeight = (d.gapBottom - d.gapTop).toFloat()
         val velocity = if (previousBirdY >= 0 && previousBirdAt > 0L) (d.birdY - previousBirdY).toFloat() / (now - previousBirdAt).coerceAtLeast(1L) else 0f
@@ -238,7 +237,7 @@ class GameAccessibilityService : AccessibilityService() {
             val tx = (d.birdX * sx).coerceIn(1f, resources.displayMetrics.widthPixels - 1f)
             val ty = ((d.birdY + cropTop) * sy).coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
             lastAutoTapAt = now
-            tap(tx, ty)
+            mainHandler.post { tap(tx, ty) }
             screenStatus = "АВТОКЛИК • птица y=" + d.birdY + " • просвет " + d.gapTop + "–" + d.gapBottom
         } else {
             screenStatus = "ИГРА • птица y=" + d.birdY + " • труба x=" + d.obstacleX + " • просвет " + d.gapTop + "–" + d.gapBottom
