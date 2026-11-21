@@ -456,15 +456,21 @@ class GameAccessibilityService : AccessibilityService() {
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
             appendRunLog("FRAME bird=${d.birdX},${d.birdY} v=${fmt(velocity)} pipe=${d.obstacleX} gap=NONE dt=${dt.toInt()}ms")
-            // If pipe detection briefly drops out, keep a soft emergency guard.
-            val guardY = fieldHeight * 0.78f
-            if (d.birdY > guardY && velocity > 0.08f && now - lastAutoTapAt >= 120L) {
-                screenStatus = "АВАРИЙНАЯ КОРРЕКЦИЯ • y=${d.birdY} • v=${"%.2f".format(velocity)}"
+            // Stabilize altitude before the first pipe is detected. Waiting until 78% of
+            // the field is too late: the bird can already be below the first opening.
+            val recoveryHorizon = 120f
+            val projectedFreeY = d.birdY + velocity * recoveryHorizon +
+                0.5f * gravity * recoveryHorizon * recoveryHorizon
+            val guardY = fieldHeight * 0.60f
+            if (projectedFreeY > guardY && velocity > 0.08f) {
+                screenStatus = "РАННЯЯ КОРРЕКЦИЯ • y=${d.birdY} • прогноз=${projectedFreeY.toInt()}"
                 if (tap(tapX, tapY)) {
                     lastAutoTapAt = now
                     tapObservationPendingAt = now
                     autoTapCount++
-                    appendRunLog("ACTION emergency_tap accepted y=${d.birdY} v=${fmt(velocity)}")
+                    appendRunLog("ACTION early_recovery_tap accepted y=${d.birdY} projected=${projectedFreeY.toInt()} v=${fmt(velocity)}")
+                } else {
+                    appendRunLog("ACTION early_recovery_tap busy_or_rejected")
                 }
             } else {
                 screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
@@ -506,26 +512,39 @@ class GameAccessibilityService : AccessibilityService() {
                 0.5f * gravity * remaining * remaining
         } else noTapPrediction
         val safeMargin = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.010f)
-        val birdHalfHeight = fieldHeight * 0.018f
+        // Use the detected sprite's actual half-height, not a fixed 1.8% of the field.
+        val birdHalfHeight = d.birdBounds.substringAfter(',').split("..")
+            .takeIf { it.size == 2 }
+            ?.let { ((it[1].toIntOrNull() ?: 0) - (it[0].toIntOrNull() ?: 0)).coerceAtLeast(0) / 2f }
+            ?.takeIf { it > 0f } ?: fieldHeight * 0.04f
         val safeTop = gapTop + safeMargin + birdHalfHeight
         val safeBottom = gapBottom - safeMargin - birdHalfHeight
         val distanceWindow = distance > 0f && distance < fieldWidth * 1.8f
 
-        // Tap only when the delayed post-flap trajectory actually fits inside the opening.
-        // This waits for a useful point on the falling arc instead of firing too early.
+        // If one flap cannot fully reach the safe window, do not give up.
+        // Compare distance to the safe interval: a recovery flap is useful when it
+        // reduces the miss, even if the bird remains outside the opening after one flap.
         val earlyCorrectionBand = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.008f)
         val predictedTooLow = noTapPrediction > safeBottom - earlyCorrectionBand
+        fun missDistance(y: Float): Float = when {
+            y < safeTop -> safeTop - y
+            y > safeBottom -> y - safeBottom
+            else -> 0f
+        }
+        val noTapMissDistance = missDistance(noTapPrediction)
+        val afterTapMissDistance = missDistance(afterTapPrediction)
         val tapTrajectoryFits = afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
-        val tapImprovesPath = afterTapPrediction < noTapPrediction - max(8f, safeMargin * 0.10f)
+        val tapImprovesPath = afterTapMissDistance <
+            noTapMissDistance - max(8f, safeMargin * 0.10f)
         val shouldTap = distanceWindow && timeToPipe > reactionMs &&
-            predictedTooLow && tapTrajectoryFits && tapImprovesPath
+            predictedTooLow && tapImprovesPath
 
         val decisionReason = when {
             !distanceWindow -> "OUT_OF_RANGE"
             timeToPipe <= reactionMs -> "TOO_LATE"
             !predictedTooLow -> "PATH_SAFE"
-            !tapTrajectoryFits -> "TAP_WOULD_MISS"
             !tapImprovesPath -> "NO_IMPROVEMENT"
+            !tapTrajectoryFits -> "TAP_RECOVERY"
             else -> "TAP"
         }
         appendRunLog("FRAME bird=${d.birdY} box=${d.birdBounds} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)} pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} gap=${gapTop.toInt()}..${gapBottom.toInt()} dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} noTap=${noTapPrediction.toInt()} afterTap=${afterTapPrediction.toInt()} safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)} decision=$decisionReason")
