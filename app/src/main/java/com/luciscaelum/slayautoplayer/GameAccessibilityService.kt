@@ -462,14 +462,41 @@ class GameAccessibilityService : AccessibilityService() {
                 val row = json.optJSONArray(key) ?: continue
                 if (row.length() < 4) continue
                 val scale = if (rewardSchema < 2) 0.02f else 1f
-                qLearningTable[key] = QEntry(
-                    floatArrayOf(
-                        row.optDouble(0, 0.0).toFloat() * scale,
-                        row.optDouble(1, 0.0).toFloat() * scale
-                    ),
-                    intArrayOf(row.optInt(2, 0), row.optInt(3, 0)),
-                    row.optInt(4, 0) != 0
+                val values = floatArrayOf(
+                    row.optDouble(0, 0.0).toFloat() * scale,
+                    row.optDouble(1, 0.0).toFloat() * scale
                 )
+                val visits = intArrayOf(row.optInt(2, 0), row.optInt(3, 0))
+                val migratedKey = if (rewardSchema < 2 && !key.startsWith("v2:")) {
+                    val bins = key.split(":")
+                    if (bins.size == 3) {
+                        val oldVelocity = bins[0].toIntOrNull()
+                        val oldTime = bins[1].toIntOrNull()
+                        val oldVertical = bins[2].toIntOrNull()
+                        if (oldVelocity != null && oldTime != null && oldVertical != null) {
+                            "v2:" +
+                                (oldVelocity * (0.30f / 0.45f)).roundToInt().coerceIn(-7, 8) + ":" +
+                                (oldTime * (120f / 180f)).roundToInt().coerceIn(0, 9) + ":" +
+                                (oldVertical * (0.15f / 0.25f)).roundToInt().coerceIn(-6, 6)
+                        } else key
+                    } else key
+                } else key
+                val existing = qLearningTable[migratedKey]
+                if (existing == null) {
+                    qLearningTable[migratedKey] = QEntry(values, visits, row.optInt(4, 0) != 0)
+                } else {
+                    for (action in 0..1) {
+                        val oldVisits = existing.visits[action]
+                        val newVisits = visits[action]
+                        val totalVisits = oldVisits + newVisits
+                        if (totalVisits > 0) {
+                            existing.values[action] =
+                                (existing.values[action] * oldVisits + values[action] * newVisits) / totalVisits
+                        }
+                        existing.visits[action] = totalVisits.coerceAtMost(1_000_000)
+                    }
+                    existing.safeExploreTried = existing.safeExploreTried || row.optInt(4, 0) != 0
+                }
             }
             qLearningRevision = meta.optLong("revision", 1L)
             qLearningUpdatedAt = meta.optLong("updated_at", 0L)
