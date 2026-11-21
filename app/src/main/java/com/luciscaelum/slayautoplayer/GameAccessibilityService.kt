@@ -244,8 +244,8 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             appendRunLog("=== КОНЕЦ ПОПЫТКИ #$attemptCount ===")
-            finishAttemptDiagnostics("GAME_OVER_OR_SCENE_LOST")
             finishQLearningAttempt(true)
+            finishAttemptDiagnostics("GAME_OVER_OR_SCENE_LOST")
             previousBirdY = -1
             previousBirdAt = 0L
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
@@ -932,7 +932,7 @@ class GameAccessibilityService : AccessibilityService() {
             val projectedLaunchY = d.birdY + velocity * launchHorizon + 0.5f * gravity * launchHorizon * launchHorizon
             val launchGuardY = fieldHeight * 0.68f
             if (!earlyLaunchTapUsed && projectedLaunchY > launchGuardY && velocity > 0.08f) {
-                if (tap(tapX, tapY)) {
+                if (tap(tapX, tapY, "LAUNCH")) {
                     earlyLaunchTapUsed = true
                     lastAutoTapAt = now
                     tapObservationPendingAt = now
@@ -1004,6 +1004,8 @@ class GameAccessibilityService : AccessibilityService() {
 
         var bestPlanY = afterTapPrediction
         var bestPlanMiss = afterTapMissDistance
+        var bestTwoTapY = noTapPrediction
+        var bestTwoTapMiss = Float.POSITIVE_INFINITY
         var plannedTapCount = 1
         var secondTapDelay = 0f
         // A second flap is a candidate, not a pre-committed tap: the next frame re-evaluates
@@ -1015,6 +1017,10 @@ class GameAccessibilityService : AccessibilityService() {
                 d.birdY.toFloat(), velocity, gravity, timeToPipe, floatArrayOf(reactionMs, secondAt)
             )
             val candidateMiss = missDistance(candidateY)
+            if (candidateMiss < bestTwoTapMiss) {
+                bestTwoTapY = candidateY
+                bestTwoTapMiss = candidateMiss
+            }
             if (candidateMiss < bestPlanMiss) {
                 bestPlanY = candidateY
                 bestPlanMiss = candidateMiss
@@ -1063,12 +1069,13 @@ class GameAccessibilityService : AccessibilityService() {
                 " pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} score=${fmt(d.pipeConfidence)} gap=${gapTop.toInt()}..${gapBottom.toInt()}" +
                 " dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()}" +
                 " wait100=${wait100.toInt()} wait200=${wait200.toInt()} wait300=${wait300.toInt()} wait400=${wait400.toInt()}" +
-                " noTap=${noTapPrediction.toInt()} oneTap=${afterTapPrediction.toInt()} bestPlan=${bestPlanY.toInt()} planTaps=$plannedTapCount secondAfter=${secondTapDelay.toInt()}ms" +
-                " miss=${noTapMissDistance.toInt()}/${afterTapMissDistance.toInt()}/${bestPlanMiss.toInt()}" +
+                " noTap=${noTapPrediction.toInt()} oneTap=${afterTapPrediction.toInt()} twoTap=${bestTwoTapY.toInt()} bestPlan=${bestPlanY.toInt()}" +
+                " planTaps=$plannedTapCount secondAfter=${secondTapDelay.toInt()}ms" +
+                " missNo/One/Two/Plan=${noTapMissDistance.toInt()}/${afterTapMissDistance.toInt()}/${if (bestTwoTapMiss.isFinite()) bestTwoTapMiss.toInt() else -1}/${bestPlanMiss.toInt()}" +
                 " safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)}" +
-                " state=$stateKey q=${fmt(qFlap)}/${fmt(qWait)} visits=$qFlapVisits/$qWaitVisits" +
+                " fallback=${if (fallbackAction == RL_FLAP) "FLAP" else "WAIT"} state=$stateKey q=${fmt(qFlap)}/${fmt(qWait)} visits=$qFlapVisits/$qWaitVisits" +
                 " tableRev=$qLearningRevision safetyRequired=$safetyRequiresTap qAction=${if (qAction == RL_FLAP) "FLAP" else "WAIT"}" +
-                " recoveryPossible=$stagedRecoveryPossible pipePassed=$pipePassed decision=$decisionReason"
+                " recoveryPossible=$stagedRecoveryPossible predictedCollision=${bestPlanMiss > 0f} gestureBusy=${gestureInFlight.get()} pipePassed=$pipePassed decision=$decisionReason"
         )
         var actualAction = RL_WAIT
         if (shouldTap) {
@@ -1087,7 +1094,7 @@ class GameAccessibilityService : AccessibilityService() {
                 appendRunLog("ACTION auto_tap accepted id=$lastTapRequestId count=$autoTapCount plannedTaps=$plannedTapCount")
             } else {
                 attemptLastAction = "FLAP_REJECTED"
-                appendRunLog("ACTION auto_tap rejected id=$lastTapRequestId reason=GESTURE_BUSY_OR_SERVICE_STATE")
+                appendRunLog("ACTION auto_tap rejected reason=see_TAP_REJECTED_EVENT")
             }
         } else {
             attemptLastAction = "WAIT"
@@ -1146,8 +1153,8 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun stopMonitoring(reason: String = "Мониторинг остановлен") {
-        finishAttemptDiagnostics("STOPPED")
         finishQLearningAttempt(false)
+        finishAttemptDiagnostics("STOPPED")
         monitoring = false
         paused = true
         manual = true
@@ -1194,7 +1201,7 @@ class GameAccessibilityService : AccessibilityService() {
                     lastTapStatus = "TAP OK"
                     lastGestureCompletedAt = SystemClock.elapsedRealtime()
                     attemptGestureCompleted++
-                    appendRunLog("GESTURE_COMPLETED id=$tapId elapsed=${lastGestureCompletedAt - dispatchAt}ms")
+                    appendRunLog("GESTURE_COMPLETED id=$tapId elapsed=${lastGestureCompletedAt - dispatchAt}ms redecision=next_capture_frame")
                     screenStatus = "ANDROID: КАСАНИЕ ВЫПОЛНЕНО"
                     gestureInFlight.set(false)
                 }
