@@ -86,6 +86,8 @@ class GameAccessibilityService : AccessibilityService() {
     private var qLearningTotalEpisodes = 0
     private var qLearningMetaStatus = "NEW"
     private var earlyLaunchTapUsed = false
+    private var hasSeenPipeThisAttempt = false
+    private var lastTrackedPipeRightX = -1
     private var tapSequence = 0L
     private var lastTapRequestId = 0L
     private var lastGestureCompletedAt = 0L
@@ -365,22 +367,26 @@ class GameAccessibilityService : AccessibilityService() {
                 candidateColumns[i] = true
             }
         }
+        // Real pipe bodies span roughly 10–20% of the field width. Small floating pickups
+        // and decorative crystals are narrower and must never become obstacle candidates.
+        val minPipeWidth = (w * 0.09f).toInt().coerceAtLeast(1)
         val groups = mutableListOf<Pair<Int, Int>>()
         var start = -1
         for (i in 0 until sampleW) {
             if (candidateColumns[i]) {
                 if (start < 0) start = i
             } else if (start >= 0) {
-                if ((i - start) * step >= w * 0.035f) groups.add(start * step to i * step)
+                if ((i - start) * step >= minPipeWidth) groups.add(start * step to i * step)
                 start = -1
             }
         }
-        if (start >= 0 && (sampleW - start) * step >= w * 0.035f) {
+        if (start >= 0 && (sampleW - start) * step >= minPipeWidth) {
             groups.add(start * step to w)
         }
+        // Keep tracking the current pipe until its trailing edge clears the bird.
+        // This prevents a tracking gap at the exact crossing point.
         val nearest = groups.firstOrNull { group ->
-            val centerX = (group.first + group.second) / 2
-            !birdFound || centerX > birdX + w * 0.04f
+            !birdFound || group.second > birdX - w * 0.035f
         }
         if (nearest == null) {
             return Detection(
@@ -651,6 +657,8 @@ class GameAccessibilityService : AccessibilityService() {
         attemptLastAction = "NONE"
         attemptUpdatedQStates.clear()
         activePipeTrackId = 0
+        lastTrackedPipeRightX = -1
+        hasSeenPipeThisAttempt = false
         lastPipeTrackLogAt = 0L
         lastPipeTrackGap = "NONE"
         synchronized(tapObservationLock) { pendingTapObservation = null }
@@ -682,6 +690,8 @@ class GameAccessibilityService : AccessibilityService() {
         trackedPipeNearBird = false
         qLearningPipePasses = 0
         earlyLaunchTapUsed = false
+        hasSeenPipeThisAttempt = false
+        lastTrackedPipeRightX = -1
     }
 
     private fun encodeQLearningState(velocity: Float, timeToPipe: Float, targetOffset: Float, gapHeight: Float, fieldHeight: Int): String {
@@ -753,20 +763,48 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun trackPipePass(d: Detection, fieldWidth: Int, now: Long): Boolean {
         val currentX = d.obstacleX
-        if (currentX < 0) return false
         val staleAge = if (lastTrackedPipeAt > 0L) now - lastTrackedPipeAt else 0L
-        val staleTrack = lastTrackedPipeAt > 0L && staleAge > 1200L
-        if (staleTrack) {
-            appendRunLog("PIPE_TRACK_STALE id=$activePipeTrackId age=${staleAge}ms lastX=$lastTrackedPipeX")
-            lastTrackedPipeX = -1
-            trackedPipeNearBird = false
+
+        // The detector deliberately drops a pipe only after its trailing edge clears the bird.
+        // Confirm the pass on that disappearance instead of waiting for the next pipe to appear.
+        if (currentX < 0 || d.pipeBounds == "NONE") {
+            val cleared = trackedPipeNearBird && lastTrackedPipeRightX >= 0 &&
+                lastTrackedPipeRightX < d.birdX - fieldWidth * 0.035f
+            if (cleared) {
+                qLearningPipePasses++
+                qLearningTotalPipePasses++
+                attemptPipePasses++
+                learnedPipeCount = qLearningTotalPipePasses
+                appendRunLog(
+                    "EVENT pipe_passed attempt=$qLearningPipePasses total=$qLearningTotalPipePasses " +
+                        "trackId=$activePipeTrackId trailingEdge=$lastTrackedPipeRightX birdX=${d.birdX} mode=TRAILING_EDGE_CLEARED"
+                )
+                trackedPipeNearBird = false
+                lastTrackedPipeX = -1
+                lastTrackedPipeRightX = -1
+                lastTrackedPipeAt = now
+                lastPipeTrackGap = "NONE"
+                return true
+            }
+            if (staleAge > 1000L) {
+                appendRunLog("PIPE_TRACK_STALE id=$activePipeTrackId age=${staleAge}ms lastX=$lastTrackedPipeX")
+                trackedPipeNearBird = false
+                lastTrackedPipeX = -1
+                lastTrackedPipeRightX = -1
+                lastTrackedPipeAt = 0L
+            }
+            return false
         }
+
+        val currentRightX = d.pipeBounds.substringAfter("..").toIntOrNull() ?: currentX
         val oldX = lastTrackedPipeX
+        val oldRightX = lastTrackedPipeRightX
         val previousWasNear = trackedPipeNearBird
         // A jump to the right means the detector switched to the next visible pipe.
         val changedToNextPipe = oldX >= 0 && currentX > oldX + fieldWidth * 0.14f
-        val passed = changedToNextPipe && previousWasNear &&
-            oldX < d.birdX + fieldWidth * 0.24f
+        val passedOnSwitch = changedToNextPipe && previousWasNear && oldRightX >= 0 &&
+            oldRightX < d.birdX - fieldWidth * 0.02f
+
         if (oldX < 0 || changedToNextPipe) {
             activePipeTrackId++
             attemptUniquePipeTracks++
@@ -778,13 +816,14 @@ class GameAccessibilityService : AccessibilityService() {
         if (changedToNextPipe) {
             appendRunLog(
                 "PIPE_TRACK_SWITCH oldId=${activePipeTrackId - 1} newId=$activePipeTrackId oldX=$oldX newX=$currentX " +
-                    "previousNear=$previousWasNear passConfirmed=$passed"
+                    "previousNear=$previousWasNear passConfirmed=$passedOnSwitch"
             )
             trackedPipeNearBird = false
         }
-        val nearBirdTrackingZone = currentX <= d.birdX + fieldWidth * 0.24f &&
-            currentX >= d.birdX - fieldWidth * 0.20f
-        if (nearBirdTrackingZone) trackedPipeNearBird = true
+
+        val overlapsBirdZone = currentRightX >= d.birdX - fieldWidth * 0.20f &&
+            currentX <= d.birdX + fieldWidth * 0.24f
+        if (overlapsBirdZone) trackedPipeNearBird = true
         val gapNow = "${d.gapTop}..${d.gapBottom}"
         if (gapNow != lastPipeTrackGap || now - lastPipeTrackLogAt >= 320L) {
             appendRunLog(
@@ -795,19 +834,20 @@ class GameAccessibilityService : AccessibilityService() {
             lastPipeTrackGap = gapNow
             lastPipeTrackLogAt = now
         }
-        if (passed) {
+        if (passedOnSwitch) {
             qLearningPipePasses++
             qLearningTotalPipePasses++
             attemptPipePasses++
             learnedPipeCount = qLearningTotalPipePasses
             appendRunLog(
                 "EVENT pipe_passed attempt=$qLearningPipePasses total=$qLearningTotalPipePasses " +
-                    "trackId=${activePipeTrackId - 1} previousX=$oldX nextPipeX=$currentX mode=NEXT_PIPE_SWITCH"
+                    "trackId=${activePipeTrackId - 1} previousRightX=$oldRightX nextPipeX=$currentX mode=NEXT_PIPE_SWITCH"
             )
         }
         lastTrackedPipeX = currentX
+        lastTrackedPipeRightX = currentRightX
         lastTrackedPipeAt = now
-        return passed
+        return passedOnSwitch
     }
 
     private fun rewardPipePassWithoutGap(now: Long) {
@@ -908,8 +948,8 @@ class GameAccessibilityService : AccessibilityService() {
             if (d.obstacleX >= 0) attemptPipeFrames++
         }
 
-        val pipePassed = if (d.obstacleX >= 0 && d.pipeBounds != "NONE")
-            trackPipePass(d, fieldWidth, now) else false
+        if (d.obstacleX >= 0 && d.pipeBounds != "NONE") hasSeenPipeThisAttempt = true
+        val pipePassed = trackPipePass(d, fieldWidth, now)
 
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
@@ -956,32 +996,101 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            appendRunLog("FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX + " gap=UNKNOWN dt=" + dt.toInt() + "ms pipePassed=" + pipePassed + " decision=WAIT_GAP")
+            appendRunLog(
+                "FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX +
+                    " gap=" + d.gapTop + ".." + d.gapBottom + " dt=" + dt.toInt() +
+                    "ms pipePassed=" + pipePassed + " decision=WAIT_GAP"
+            )
             if (pipePassed) rewardPipePassWithoutGap(now)
-            // Allow one launch-stabilization flap only; repeated blind flaps caused the previous overshoot.
-            val launchHorizon = 120f
-            val projectedLaunchY = d.birdY + velocity * launchHorizon + 0.5f * gravity * launchHorizon * launchHorizon
-            val launchGuardY = fieldHeight * 0.68f
-            if (!earlyLaunchTapUsed && projectedLaunchY > launchGuardY && velocity > 0.08f) {
-                if (tap(tapX, tapY, "LAUNCH", velocity, d.birdY)) {
-                    earlyLaunchTapUsed = true
-                    lastAutoTapAt = now
-                    autoTapCount++
-                    attemptAutoTaps++
-                    attemptLastAction = "FLAP_LAUNCH"
-                    appendRunLog("ACTION single_launch_tap accepted id=$lastTapRequestId y=" + d.birdY + " projected=" + projectedLaunchY.toInt())
-                    screenStatus = "ПЕРВЫЙ ПОДЪЁМ • одна стартовая коррекция"
+
+            val pipeVisibleButUnconfirmed = d.obstacleX >= 0 && d.pipeBounds != "NONE"
+            if (!hasSeenPipeThisAttempt && !pipeVisibleButUnconfirmed) {
+                // The launch correction is allowed only before the first pipe is ever seen.
+                val launchHorizon = 120f
+                val projectedLaunchY = d.birdY + velocity * launchHorizon +
+                    0.5f * gravity * launchHorizon * launchHorizon
+                val launchGuardY = fieldHeight * 0.68f
+                if (!earlyLaunchTapUsed && projectedLaunchY > launchGuardY && velocity > 0.08f) {
+                    if (tap(tapX, tapY, "LAUNCH", velocity, d.birdY)) {
+                        earlyLaunchTapUsed = true
+                        lastAutoTapAt = now
+                        autoTapCount++
+                        attemptAutoTaps++
+                        attemptLastAction = "FLAP_LAUNCH"
+                        appendRunLog("ACTION single_launch_tap accepted id=$lastTapRequestId y=" + d.birdY +
+                            " projected=" + projectedLaunchY.toInt())
+                        screenStatus = "ПЕРВЫЙ ПОДЪЁМ • одна стартовая коррекция"
+                    } else {
+                        appendRunLog("ACTION single_launch_tap busy_or_rejected")
+                    }
                 } else {
-                    appendRunLog("ACTION single_launch_tap busy_or_rejected")
+                    screenStatus = "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
                 }
+            } else if (pipeVisibleButUnconfirmed) {
+                // A visible pipe with uncertain geometry is not a cruise-control opportunity.
+                screenStatus = "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
+                appendRunLog("INTERPIPE_CONTROL action=WAIT reason=PIPE_GAP_UNCONFIRMED")
             } else {
-                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
-                    else "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
+                // Between pipes, ignore all floating pickups and hold a broad central flight band.
+                // Re-plan after each measured flap response; never send a blind tap sequence.
+                val cruiseHorizon = 300f
+                val predictedWithoutTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, cruiseHorizon, floatArrayOf()
+                )
+                val predictedWithTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, cruiseHorizon, floatArrayOf(65f)
+                )
+                val cruiseUpper = fieldHeight * 0.20f
+                val cruiseLower = fieldHeight * 0.72f
+                val minImprovement = max(20f, fieldHeight * 0.025f)
+                val tapSpacingReady = lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L
+                val cruiseNeedsLift = predictedWithoutTap > cruiseLower && velocity > -0.12f
+                val tapKeepsInField = predictedWithTap in cruiseUpper..cruiseLower
+                val tapMeaningfullyImproves = predictedWithoutTap - predictedWithTap >= minImprovement
+                val cruiseTapReady = !tapFeedbackPending && !gestureInFlight.get() && tapSpacingReady
+                val shouldCruiseTap = cruiseTapReady && cruiseNeedsLift && tapKeepsInField &&
+                    tapMeaningfullyImproves
+
+                if (shouldCruiseTap) {
+                    if (tap(tapX, tapY, "CRUISE", velocity, d.birdY)) {
+                        lastAutoTapAt = now
+                        autoTapCount++
+                        attemptAutoTaps++
+                        attemptFlapDecisions++
+                        attemptLastAction = "FLAP_INTERPIPE"
+                        appendRunLog(
+                            "INTERPIPE_CONTROL action=FLAP y=${d.birdY} v=${fmt(velocity)} " +
+                                "wait300=${predictedWithoutTap.toInt()} tap300=${predictedWithTap.toInt()} " +
+                                "band=${cruiseUpper.toInt()}..${cruiseLower.toInt()}"
+                        )
+                    } else {
+                        attemptLastAction = "FLAP_INTERPIPE_REJECTED"
+                        appendRunLog("INTERPIPE_CONTROL action=WAIT reason=TAP_REJECTED")
+                    }
+                } else {
+                    attemptWaitDecisions++
+                    attemptLastAction = "WAIT_INTERPIPE"
+                    val reason = when {
+                        tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
+                        gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
+                        !tapSpacingReady -> "INTERTAP_SPACING"
+                        !cruiseNeedsLift -> "TRAJECTORY_IN_BAND_OR_RISING"
+                        !tapKeepsInField -> "TAP_WOULD_OVERSHOOT"
+                        else -> "TAP_NOT_USEFUL"
+                    }
+                    appendRunLog(
+                        "INTERPIPE_CONTROL action=WAIT reason=$reason y=${d.birdY} v=${fmt(velocity)} " +
+                            "wait300=${predictedWithoutTap.toInt()} tap300=${predictedWithTap.toInt()} " +
+                            "band=${cruiseUpper.toInt()}..${cruiseLower.toInt()}"
+                    )
+                    screenStatus = "МЕЖДУ ТРУБАМИ • y=${d.birdY} • прогноз=${predictedWithoutTap.toInt()}"
+                }
             }
             previousObstacleX = -1
             previousObstacleAt = 0L
             return
         }
+
         val gapTop = d.gapTop.toFloat()
         val gapBottom = d.gapBottom.toFloat()
         val gapHeight = (gapBottom - gapTop).coerceAtLeast(1f)
