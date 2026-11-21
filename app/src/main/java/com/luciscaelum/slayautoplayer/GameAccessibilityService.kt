@@ -40,6 +40,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousVerticalVelocity = 0f
     private var previousRawVerticalVelocity = 0f
     private var estimatedFlapVelocity = -0.55f
+    private var estimatedGravity = 0.0018f
     private var tapObservationPendingAt = 0L
     private val runLogLock = Any()
     private val runLog = ArrayDeque<String>()
@@ -178,6 +179,7 @@ class GameAccessibilityService : AccessibilityService() {
             previousVerticalVelocity = 0f
             previousRawVerticalVelocity = 0f
             estimatedFlapVelocity = -0.55f
+            estimatedGravity = 0.0018f
             tapObservationPendingAt = 0L
             autoTapCount = 0
             manualTapCount = 0
@@ -403,17 +405,21 @@ class GameAccessibilityService : AccessibilityService() {
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
             (d.birdY - previousBirdY).toFloat() / dt else 0f
-        // Responsive velocity estimate; excessive smoothing makes the parabola lag after taps.
-        val rawGravity = if (dt > 0f && previousBirdAt > 0L)
-            ((rawVelocity - previousRawVerticalVelocity) / dt).coerceIn(-0.004f, 0.004f) else 0f
-        val gravity = (rawGravity * 0.20f + 0.0012f * 0.80f).coerceIn(0.00035f, 0.0024f)
-        // rawVelocity is average speed across the previous frame; estimate speed at its end.
+        // A sharp upward velocity jump is a flap, not gravity. Exclude it from acceleration learning.
+        val manualImpulseDetected = previousBirdAt > 0L && dt in 45f..260f &&
+            rawVelocity < previousRawVerticalVelocity - 0.18f
+        if (dt > 0f && previousBirdAt > 0L && !manualImpulseDetected) {
+            val measuredGravity = ((rawVelocity - previousRawVerticalVelocity) / dt)
+                .coerceIn(0.00035f, 0.0060f)
+            estimatedGravity = (estimatedGravity * 0.35f + measuredGravity * 0.65f)
+                .coerceIn(0.00035f, 0.0060f)
+        }
+        val gravity = estimatedGravity
+        // Use end-of-frame velocity; the previous 40/60 smoothing lagged behind the falling bird.
         val instantaneousVelocity = if (dt > 0f) rawVelocity + gravity * dt * 0.5f else 0f
         val velocity = if (previousBirdAt > 0L)
-            previousVerticalVelocity * 0.40f + instantaneousVelocity * 0.60f else 0f
+            previousVerticalVelocity * 0.15f + instantaneousVelocity * 0.85f else 0f
 
-        // Learn the actual post-flap velocity. Screen Y grows downward, so gravity
-        // makes the measured interval-average velocity LESS negative: subtract half-step gravity.
         if (tapObservationPendingAt > 0L && now - tapObservationPendingAt >= 65L && dt > 0f) {
             val observedFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, 0.8f)
             if (observedFlapVelocity < -0.03f) {
@@ -421,10 +427,7 @@ class GameAccessibilityService : AccessibilityService() {
                     .coerceIn(-2.5f, -0.08f)
             }
             tapObservationPendingAt = 0L
-        } else if (tapObservationPendingAt == 0L && previousBirdAt > 0L && dt in 45f..260f &&
-            rawVelocity < previousRawVerticalVelocity - 0.18f) {
-            // A sharp upward velocity change usually means the player tapped manually.
-            // Treat it as a flap too, so human assistance does not leave the physics model stale.
+        } else if (tapObservationPendingAt == 0L && manualImpulseDetected) {
             val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, -0.08f)
             estimatedFlapVelocity = (estimatedFlapVelocity * 0.25f + manualFlapVelocity * 0.75f)
                 .coerceIn(-2.5f, -0.08f)
@@ -467,7 +470,7 @@ class GameAccessibilityService : AccessibilityService() {
         val gapBottom = d.gapBottom.toFloat()
         val gapHeight = (gapBottom - gapTop).coerceAtLeast(1f)
         val targetY = gapTop + gapHeight * 0.50f
-        val distance = (d.obstacleX - d.birdX).toFloat()
+        val distance = (d.obstacleX - d.birdX - fieldWidth * 0.018f).toFloat()
 
         val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
         val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt in 35f..500f)
@@ -483,7 +486,7 @@ class GameAccessibilityService : AccessibilityService() {
 
         val timeToPipe = (distance / obstacleSpeed).coerceIn(0f, 1400f)
         // Include processing and Android gesture latency: the flap impulse arrives later.
-        val reactionMs = 105f
+        val reactionMs = 65f
         val noTapPrediction = d.birdY + velocity * timeToPipe +
             0.5f * gravity * timeToPipe * timeToPipe
         val tapDelay = min(reactionMs, timeToPipe)
@@ -494,15 +497,17 @@ class GameAccessibilityService : AccessibilityService() {
                 0.5f * gravity * remaining * remaining
         } else noTapPrediction
         val safeMargin = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.010f)
-        val safeTop = gapTop + safeMargin
-        val safeBottom = gapBottom - safeMargin
+        val birdHalfHeight = fieldHeight * 0.018f
+        val safeTop = gapTop + safeMargin + birdHalfHeight
+        val safeBottom = gapBottom - safeMargin - birdHalfHeight
         val distanceWindow = distance > 0f && distance < fieldWidth * 1.8f
 
         // Tap only when the delayed post-flap trajectory actually fits inside the opening.
         // This waits for a useful point on the falling arc instead of firing too early.
-        val predictedTooLow = noTapPrediction > safeBottom
+        val earlyCorrectionBand = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.008f)
+        val predictedTooLow = noTapPrediction > safeBottom - earlyCorrectionBand
         val tapTrajectoryFits = afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
-        val tapImprovesPath = afterTapPrediction < noTapPrediction - safeMargin * 0.15f
+        val tapImprovesPath = afterTapPrediction < noTapPrediction - max(8f, safeMargin * 0.10f)
         val shouldTap = distanceWindow && timeToPipe > reactionMs &&
             predictedTooLow && tapTrajectoryFits && tapImprovesPath
 
@@ -554,6 +559,7 @@ class GameAccessibilityService : AccessibilityService() {
         previousVerticalVelocity = 0f
         previousRawVerticalVelocity = 0f
         estimatedFlapVelocity = -0.55f
+        estimatedGravity = 0.0018f
         tapObservationPendingAt = 0L
         lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
