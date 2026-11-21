@@ -17,6 +17,9 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONArray
+import org.json.JSONObject
+import kotlin.math.roundToInt
 
 class GameAccessibilityService : AccessibilityService() {
     private val screenshotExecutor = Executors.newSingleThreadExecutor()
@@ -46,6 +49,18 @@ class GameAccessibilityService : AccessibilityService() {
     private val runLog = ArrayDeque<String>()
     private var runStartedAt = 0L
     private var attemptCount = 0
+    private data class QEntry(val values: FloatArray = FloatArray(2), val visits: IntArray = IntArray(2))
+    private data class QTransition(val state: String, val action: Int, val reward: Float, val nextState: String?)
+    private val qLearningTable = LinkedHashMap<String, QEntry>()
+    private val qLearningEpisode = ArrayList<QTransition>(512)
+    private var qLearningLoaded = false
+    private var pendingRlState: String? = null
+    private var pendingRlAction = RL_WAIT
+    private var pendingRlAt = 0L
+    private var lastTrackedPipeX = -1
+    private var trackedPipeNearBird = false
+    private var qLearningPipePasses = 0
+    private val gravitySamples = ArrayDeque<Float>()
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
     private val eventScanTask = Runnable {
@@ -62,6 +77,7 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        ensureQLearningLoaded()
         screenStatus = "Служба подключена"
     }
 
@@ -171,6 +187,9 @@ class GameAccessibilityService : AccessibilityService() {
         val detection = detectPlayfield(field)
         lastDetectionMs = SystemClock.elapsedRealtime() - detectionStartedAt
         if (detection.activeGame && !wasActiveGame) {
+            ensureQLearningLoaded()
+            resetQLearningAttempt()
+            gravitySamples.clear()
             previousBirdY = -1
             previousBirdAt = 0L
             lastAutoTapAt = 0L
@@ -189,6 +208,7 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             appendRunLog("=== КОНЕЦ ПОПЫТКИ #$attemptCount ===")
+            finishQLearningAttempt(true)
             previousBirdY = -1
             previousBirdAt = 0L
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
@@ -395,13 +415,133 @@ class GameAccessibilityService : AccessibilityService() {
         )
     }
 
-    private fun handleAutoControl(
-        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
+    private fun ensureQLearningLoaded() {
+        if (qLearningLoaded) return
+        qLearningLoaded = true
+        val saved = getSharedPreferences("bird_play_learning", MODE_PRIVATE).getString("q_table", null)
+        if (saved.isNullOrBlank()) { appendRunLog("RL table empty; online learning enabled"); return }
+        try {
+            val json = JSONObject(saved)
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val row = json.optJSONArray(key) ?: continue
+                if (row.length() < 4) continue
+                qLearningTable[key] = QEntry(
+                    floatArrayOf(row.optDouble(0, 0.0).toFloat(), row.optDouble(1, 0.0).toFloat()),
+                    intArrayOf(row.optInt(2, 0), row.optInt(3, 0))
+                )
+            }
+            learnedStateCount = qLearningTable.size
+            appendRunLog("RL table loaded states=" + qLearningTable.size)
+        } catch (e: Exception) {
+            qLearningTable.clear()
+            appendRunLog("RL table load error=" + e.javaClass.simpleName)
+        }
+    }
+
+    private fun persistQLearningTable() {
+        learnedStateCount = qLearningTable.size
+        learnedPipeCount = qLearningPipePasses
+        try {
+            val json = JSONObject()
+            for ((state, entry) in qLearningTable) {
+                val row = JSONArray().put(entry.values[0].toDouble()).put(entry.values[1].toDouble())
+                    .put(entry.visits[0]).put(entry.visits[1])
+                json.put(state, row)
+            }
+            getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit().putString("q_table", json.toString()).apply()
+        } catch (e: Exception) { appendRunLog("RL table save error=" + e.javaClass.simpleName) }
+    }
+
+    private fun resetQLearningAttempt() {
+        qLearningEpisode.clear()
+        pendingRlState = null
+        pendingRlAt = 0L
+        lastTrackedPipeX = -1
+        trackedPipeNearBird = false
+        qLearningPipePasses = 0
+    }
+
+    private fun encodeQLearningState(velocity: Float, timeToPipe: Float, targetOffset: Float, gapHeight: Float, fieldHeight: Int): String {
+        val normalizedVelocity = velocity * 1000f / fieldHeight.coerceAtLeast(1)
+        val velocityBin = (normalizedVelocity / 0.30f).roundToInt().coerceIn(-10, 12)
+        val timeBin = (timeToPipe / 120f).roundToInt().coerceIn(0, 14)
+        val verticalBin = ((targetOffset / gapHeight.coerceAtLeast(1f)) / 0.15f).roundToInt().coerceIn(-10, 10)
+        return velocityBin.toString() + ":" + timeBin.toString() + ":" + verticalBin.toString()
+    }
+
+    private fun qLearningChoice(state: String, fallback: Int): Int {
+        val entry = qLearningTable[state] ?: return fallback
+        if (entry.visits[RL_FLAP] < 2 || entry.visits[RL_WAIT] < 2) return fallback
+        val difference = entry.values[RL_FLAP] - entry.values[RL_WAIT]
+        return when { difference > 0.20f -> RL_FLAP; difference < -0.20f -> RL_WAIT; else -> fallback }
+    }
+
+    private fun observeQLearningDecision(state: String, action: Int, now: Long, pipePassed: Boolean) {
+        val previousState = pendingRlState
+        if (previousState != null) {
+            val elapsed = (now - pendingRlAt).coerceIn(30L, 240L).toFloat()
+            val reward = 0.5f * (elapsed / 80f) + if (pipePassed) 5f else 0f
+            qLearningEpisode.add(QTransition(previousState, pendingRlAction, reward, state))
+            if (pipePassed) { updateQLearningEpisode("PIPE"); qLearningEpisode.clear() }
+            else if (qLearningEpisode.size >= 1800) { updateQLearningEpisode("CHUNK"); qLearningEpisode.clear() }
+        }
+        pendingRlState = state
+        pendingRlAction = action
+        pendingRlAt = now
+    }
+
+    private fun finishQLearningAttempt(death: Boolean) {
+        val state = pendingRlState
+        if (death && state != null) qLearningEpisode.add(QTransition(state, pendingRlAction, -1000f, null))
+        pendingRlState = null
+        pendingRlAt = 0L
+        if (qLearningEpisode.isNotEmpty()) {
+            updateQLearningEpisode(if (death) "DEATH" else "STOP")
+            qLearningEpisode.clear()
+        }
+    }
+
+    private fun updateQLearningEpisode(reason: String) {
+        if (qLearningEpisode.isEmpty()) return
+        // Backward Q-Learning propagates pipe-pass/death rewards through the preceding trajectory.
+        for (transition in qLearningEpisode.asReversed()) {
+            val entry = qLearningTable.getOrPut(transition.state) { QEntry() }
+            val nextValue = transition.nextState?.let { next -> qLearningTable[next]?.values?.maxOrNull() ?: 0f } ?: 0f
+            val target = transition.reward + nextValue
+            val action = transition.action.coerceIn(RL_FLAP, RL_WAIT)
+            entry.values[action] += 0.20f * (target - entry.values[action])
+            entry.visits[action] = (entry.visits[action] + 1).coerceAtMost(1_000_000)
+        }
+        while (qLearningTable.size > 5000) {
+            val weakest = qLearningTable.entries.minByOrNull { it.value.visits[0] + it.value.visits[1] }?.key ?: break
+            qLearningTable.remove(weakest)
+        }
+        persistQLearningTable()
+        appendRunLog("RL BACKWARD_UPDATE reason=" + reason + " states=" + qLearningEpisode.size + " table=" + qLearningTable.size + " pipes=" + qLearningPipePasses)
+    }
+
+    private fun trackPipePass(d: Detection, fieldWidth: Int): Boolean {
+        val oldX = lastTrackedPipeX
+        val passed = oldX >= 0 && trackedPipeNearBird && d.obstacleX > oldX + fieldWidth * 0.22f
+        if (passed) {
+            qLearningPipePasses++
+            trackedPipeNearBird = false
+            appendRunLog("EVENT pipe_passed count=" + qLearningPipePasses + " nextPipeX=" + d.obstacleX)
+        }
+        if (d.obstacleX < d.birdX + fieldWidth * 0.20f) trackedPipeNearBird = true
+        lastTrackedPipeX = d.obstacleX
+        return passed
+    }
+
+    private fun handleAutoControl(        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
     ) {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
-        if (!d.activeGame || d.birdX < 0 || d.birdY < 0) {
-            appendRunLog("FRAME bird=${d.birdX},${d.birdY} pipe=${d.obstacleX} gap=${d.gapTop}..${d.gapBottom} state=NO_TRACK msg=${d.message}")
+        if (!d.activeGame) {
+            if (pendingRlState != null || qLearningEpisode.isNotEmpty()) finishQLearningAttempt(true)
+            appendRunLog("FRAME state=GAME_OVER msg=" + d.message)
             previousBirdY = -1
             previousBirdAt = 0L
             previousObstacleX = -1
@@ -410,38 +550,49 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = d.message
             return
         }
+        if (d.birdX < 0 || d.birdY < 0) {
+            appendRunLog("FRAME bird=" + d.birdX + "," + d.birdY + " pipe=" + d.obstacleX + " gap=" + d.gapTop + ".." + d.gapBottom + " state=NO_TRACK msg=" + d.message)
+            screenStatus = d.message
+            return
+        }
 
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
             (d.birdY - previousBirdY).toFloat() / dt else 0f
         // A sharp upward velocity jump is a flap, not gravity. Exclude it from acceleration learning.
-        val manualImpulseDetected = previousBirdAt > 0L && dt in 45f..260f &&
-            rawVelocity < previousRawVerticalVelocity - 0.18f
-        if (dt > 0f && previousBirdAt > 0L && !manualImpulseDetected) {
-            val measuredGravity = ((rawVelocity - previousRawVerticalVelocity) / dt)
-                .coerceIn(0.00035f, 0.0060f)
-            estimatedGravity = (estimatedGravity * 0.35f + measuredGravity * 0.65f)
-                .coerceIn(0.00035f, 0.0060f)
+        val impulseDetected = previousBirdAt > 0L && dt in 50f..190f &&
+            rawVelocity < previousRawVerticalVelocity - 0.28f
+        if (dt > 0f && previousBirdAt > 0L && !impulseDetected) {
+            val measuredGravity = (rawVelocity - previousRawVerticalVelocity) / dt
+            if (measuredGravity in 0.00025f..0.0080f) {
+                gravitySamples.addLast(measuredGravity)
+                if (gravitySamples.size > 7) gravitySamples.removeFirst()
+                if (gravitySamples.size >= 3) {
+                    val robustGravity = gravitySamples.sorted()[gravitySamples.size / 2]
+                    estimatedGravity = (estimatedGravity * 0.82f + robustGravity * 0.18f).coerceIn(0.00035f, 0.0060f)
+                }
+            }
         }
         val gravity = estimatedGravity
-        // Use end-of-frame velocity; the previous 40/60 smoothing lagged behind the falling bird.
+        // Smooth sprite-bounds animation noise without adding a long controller delay.
         val instantaneousVelocity = if (dt > 0f) rawVelocity + gravity * dt * 0.5f else 0f
         val velocity = if (previousBirdAt > 0L)
-            previousVerticalVelocity * 0.15f + instantaneousVelocity * 0.85f else 0f
-
+            previousVerticalVelocity * 0.32f + instantaneousVelocity * 0.68f else 0f
         if (tapObservationPendingAt > 0L && now - tapObservationPendingAt >= 65L && dt > 0f) {
             val observedFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, 0.8f)
             if (observedFlapVelocity < -0.03f) {
-                estimatedFlapVelocity = (estimatedFlapVelocity * 0.20f + observedFlapVelocity * 0.80f)
+                estimatedFlapVelocity = (estimatedFlapVelocity * 0.55f + observedFlapVelocity * 0.45f)
                     .coerceIn(-2.5f, -0.08f)
             }
             tapObservationPendingAt = 0L
-        } else if (tapObservationPendingAt == 0L && manualImpulseDetected) {
+        } else if (tapObservationPendingAt == 0L && impulseDetected &&
+            (lastAutoTapAt == 0L || now - lastAutoTapAt > 280L)) {
             val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-2.5f, -0.08f)
-            estimatedFlapVelocity = (estimatedFlapVelocity * 0.25f + manualFlapVelocity * 0.75f)
+            estimatedFlapVelocity = (estimatedFlapVelocity * 0.55f + manualFlapVelocity * 0.45f)
                 .coerceIn(-2.5f, -0.08f)
             manualTapCount++
-            appendRunLog("ACTION manual_tap_detected estimatedFlapV=${fmt(estimatedFlapVelocity)} count=$manualTapCount")
+            if (pendingRlState != null) pendingRlAction = RL_FLAP
+            appendRunLog("ACTION manual_tap_detected estimatedFlapV=" + fmt(estimatedFlapVelocity) + " count=" + manualTapCount + " rl_action=FLAP")
         }
         previousBirdY = d.birdY
         previousBirdAt = now
@@ -455,37 +606,24 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            appendRunLog("FRAME bird=${d.birdX},${d.birdY} v=${fmt(velocity)} pipe=${d.obstacleX} gap=NONE dt=${dt.toInt()}ms")
-            // Stabilize altitude before the first pipe is detected. Waiting until 78% of
-            // the field is too late: the bird can already be below the first opening.
-            val recoveryHorizon = 120f
-            val projectedFreeY = d.birdY + velocity * recoveryHorizon +
-                0.5f * gravity * recoveryHorizon * recoveryHorizon
-            val guardY = fieldHeight * 0.60f
-            if (projectedFreeY > guardY && velocity > 0.08f) {
-                screenStatus = "РАННЯЯ КОРРЕКЦИЯ • y=${d.birdY} • прогноз=${projectedFreeY.toInt()}"
-                if (tap(tapX, tapY)) {
-                    lastAutoTapAt = now
-                    tapObservationPendingAt = now
-                    autoTapCount++
-                    appendRunLog("ACTION early_recovery_tap accepted y=${d.birdY} projected=${projectedFreeY.toInt()} v=${fmt(velocity)}")
-                } else {
-                    appendRunLog("ACTION early_recovery_tap busy_or_rejected")
-                }
-            } else {
-                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=${d.obstacleX} • уточняю просвет"
-                    else "ПТИЦА y=${d.birdY} • поиск следующей трубы"
-            }
+            appendRunLog("FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX + " gap=UNKNOWN dt=" + dt.toInt() + "ms decision=WAIT_GAP")
+            // No geometry means no flap. The prior fixed-height recovery taps caused the logged overshoot.
+            screenStatus = if (d.obstacleX >= 0) "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
+                else "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
             previousObstacleX = -1
             previousObstacleAt = 0L
             return
         }
-
         val gapTop = d.gapTop.toFloat()
         val gapBottom = d.gapBottom.toFloat()
         val gapHeight = (gapBottom - gapTop).coerceAtLeast(1f)
         val targetY = gapTop + gapHeight * 0.50f
-        val distance = (d.obstacleX - d.birdX - fieldWidth * 0.018f).toFloat()
+        val birdHalfWidth = d.birdBounds.substringBefore(',').split("..")
+            .takeIf { it.size == 2 }
+            ?.let { ((it[1].toIntOrNull() ?: 0) - (it[0].toIntOrNull() ?: 0)).coerceAtLeast(0) / 2f }
+            ?.takeIf { it > 0f } ?: fieldWidth * 0.018f
+        val distance = (d.obstacleX - d.birdX - birdHalfWidth - fieldWidth * 0.006f).toFloat()
+        val pipePassed = trackPipePass(d, fieldWidth)
 
         val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
         val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt in 35f..500f)
@@ -519,13 +657,9 @@ class GameAccessibilityService : AccessibilityService() {
             ?.takeIf { it > 0f } ?: fieldHeight * 0.04f
         val safeTop = gapTop + safeMargin + birdHalfHeight
         val safeBottom = gapBottom - safeMargin - birdHalfHeight
+        val safeWindowValid = safeBottom > safeTop
         val distanceWindow = distance > 0f && distance < fieldWidth * 1.8f
 
-        // If one flap cannot fully reach the safe window, do not give up.
-        // Compare distance to the safe interval: a recovery flap is useful when it
-        // reduces the miss, even if the bird remains outside the opening after one flap.
-        val earlyCorrectionBand = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.008f)
-        val predictedTooLow = noTapPrediction > safeBottom - earlyCorrectionBand
         fun missDistance(y: Float): Float = when {
             y < safeTop -> safeTop - y
             y > safeBottom -> y - safeBottom
@@ -533,42 +667,67 @@ class GameAccessibilityService : AccessibilityService() {
         }
         val noTapMissDistance = missDistance(noTapPrediction)
         val afterTapMissDistance = missDistance(afterTapPrediction)
-        val tapTrajectoryFits = afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
-        val tapImprovesPath = afterTapMissDistance <
-            noTapMissDistance - max(8f, safeMargin * 0.10f)
-        val shouldTap = distanceWindow && timeToPipe > reactionMs &&
-            predictedTooLow && tapImprovesPath
+        val earlyCorrectionBand = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.008f)
+        val predictedTooLow = noTapPrediction > safeBottom - earlyCorrectionBand
+        val tapImprovesPath = afterTapMissDistance < noTapMissDistance - max(8f, safeMargin * 0.10f)
+        val tapDoesNotOvershootHigh = afterTapPrediction >= safeTop - fieldHeight * 0.008f
+        val tapSafe = safeWindowValid && tapImprovesPath && tapDoesNotOvershootHigh
+        val fallbackAction = if (distanceWindow && timeToPipe > reactionMs && predictedTooLow && tapSafe) RL_FLAP else RL_WAIT
+        val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
+        val qAction = qLearningChoice(stateKey, fallbackAction)
+        val qEntry = qLearningTable[stateKey]
+        val qFlap = qEntry?.values?.get(RL_FLAP) ?: 0f
+        val qWait = qEntry?.values?.get(RL_WAIT) ?: 0f
+        val qFlapVisits = qEntry?.visits?.get(RL_FLAP) ?: 0
+        val qWaitVisits = qEntry?.visits?.get(RL_WAIT) ?: 0
+        val qCanFlapWithoutRisk = noTapPrediction >= safeTop && noTapPrediction <= safeBottom &&
+            afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
+        // Physics shield is authoritative; Q-Learning can refine safe choices but cannot force an unsafe flap.
+        val shouldTap = distanceWindow && timeToPipe > reactionMs && safeWindowValid && noTapPrediction >= safeTop &&
+            (fallbackAction == RL_FLAP || (qAction == RL_FLAP && tapSafe && qCanFlapWithoutRisk))
 
         val decisionReason = when {
             !distanceWindow -> "OUT_OF_RANGE"
             timeToPipe <= reactionMs -> "TOO_LATE"
-            !predictedTooLow -> "PATH_SAFE"
-            !tapImprovesPath -> "NO_IMPROVEMENT"
-            !tapTrajectoryFits -> "TAP_RECOVERY"
-            else -> "TAP"
+            !safeWindowValid -> "INVALID_SAFE_WINDOW"
+            noTapPrediction < safeTop -> "TOO_HIGH_WAIT"
+            shouldTap && fallbackAction == RL_FLAP -> "SAFETY_TAP"
+            shouldTap -> "QLEARNING_TAP"
+            predictedTooLow && !tapSafe -> "TAP_NOT_SAFE"
+            qAction == RL_FLAP && !qCanFlapWithoutRisk -> "QLEARNING_SHIELDED"
+            else -> "WAIT"
         }
-        appendRunLog("FRAME bird=${d.birdY} box=${d.birdBounds} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)} pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} gap=${gapTop.toInt()}..${gapBottom.toInt()} dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} noTap=${noTapPrediction.toInt()} afterTap=${afterTapPrediction.toInt()} safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)} decision=$decisionReason")
+        appendRunLog(
+            "FRAME bird=" + d.birdY + " box=" + d.birdBounds + " v=" + fmt(velocity) + " raw=" + fmt(rawVelocity) + " g=" + fmt(gravity) +
+                " pipeX=" + d.obstacleX + " pipeBox=" + d.pipeBounds + " runs=" + d.pipeRuns + " gap=" + gapTop.toInt() + ".." + gapBottom.toInt() +
+                " dist=" + distance.toInt() + " speed=" + fmt(obstacleSpeed) + " t=" + timeToPipe.toInt() + " noTap=" + noTapPrediction.toInt() +
+                " afterTap=" + afterTapPrediction.toInt() + " safe=" + safeTop.toInt() + ".." + safeBottom.toInt() + " flapV=" + fmt(estimatedFlapVelocity) +
+                " state=" + stateKey + " q=" + fmt(qFlap) + "/" + fmt(qWait) + " visits=" + qFlapVisits + "/" + qWaitVisits +
+                " pipePassed=" + pipePassed + " decision=" + decisionReason
+        )
+        var actualAction = RL_WAIT
         if (shouldTap) {
-            screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
+            screenStatus = "КОРРЕКЦИЯ • без тапа " + noTapPrediction.toInt() + " • с тапом " + afterTapPrediction.toInt() +
+                " • проём " + safeTop.toInt() + ".." + safeBottom.toInt()
             if (tap(tapX, tapY)) {
+                actualAction = RL_FLAP
                 lastAutoTapAt = now
                 tapObservationPendingAt = now
                 autoTapCount++
-                appendRunLog("ACTION auto_tap accepted count=$autoTapCount")
+                appendRunLog("ACTION auto_tap accepted count=" + autoTapCount)
             } else {
-                appendRunLog("ACTION auto_tap rejected_or_busy")
+                appendRunLog("ACTION auto_tap busy_or_rejected")
             }
         } else {
-            val phase = when {
-                velocity < -0.02f -> "ПОДЪЁМ"
-                velocity > 0.02f -> "ПАДЕНИЕ"
-                else -> "ВЕРШИНА ДУГИ"
-            }
-            screenStatus = "$phase • y=${d.birdY} • v=${"%.2f".format(velocity)} • t=${timeToPipe.toInt()}мс • без=${noTapPrediction.toInt()} • тап=${afterTapPrediction.toInt()} • окно=$safeTop..$safeBottom"
+            val phase = when { velocity < -0.02f -> "ПОДЪЁМ"; velocity > 0.02f -> "ПАДЕНИЕ"; else -> "ВЕРШИНА ДУГИ" }
+            screenStatus = phase + " • y=" + d.birdY + " • v=" + fmt(velocity) + " • t=" + timeToPipe.toInt() + "мс • прогноз=" +
+                noTapPrediction.toInt() + " • окно=" + safeTop.toInt() + ".." + safeBottom.toInt()
         }
+        observeQLearningDecision(stateKey, actualAction, now, pipePassed)
     }
 
     private fun startMonitoringInternal() {
+        ensureQLearningLoaded()
         if (instance == null) {
             screenStatus = "Включи службу специальных возможностей"
             return
@@ -600,6 +759,8 @@ class GameAccessibilityService : AccessibilityService() {
         previousRawVerticalVelocity = 0f
         estimatedFlapVelocity = -0.55f
         estimatedGravity = 0.0018f
+        gravitySamples.clear()
+        resetQLearningAttempt()
         tapObservationPendingAt = 0L
         lastSceneSeenAt = 0L
         screenStatus = "АВТОПИЛОТ ВКЛЮЧЁН • жду игровую сцену • громкость − = СТОП"
@@ -609,6 +770,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun stopMonitoring(reason: String = "Мониторинг остановлен") {
+        finishQLearningAttempt(false)
         monitoring = false
         paused = true
         manual = true
@@ -697,6 +859,10 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastGapTop = -1
         @Volatile var lastGapBottom = -1
         @Volatile var lastTapStatus = "TAP —"
+        @Volatile var learnedStateCount = 0
+        @Volatile var learnedPipeCount = 0
+        const val RL_FLAP = 0
+        const val RL_WAIT = 1
         @Volatile private var instance: GameAccessibilityService? = null
 
         fun getRunLog(): String = instance?.exportRunLog() ?: "Служба Bird Play не подключена."
