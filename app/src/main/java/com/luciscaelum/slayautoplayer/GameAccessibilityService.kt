@@ -34,6 +34,10 @@ class GameAccessibilityService : AccessibilityService() {
     @Volatile private var nextScreenshotAllowedAt = 0L
     @Volatile private var screenshotIntervalMs = 650L
     private var previousBirdY = -1
+    private var previousBirdX = -1
+    private var baselineBirdWidth = -1f
+    private var baselineBirdHeight = -1f
+    private var lastBirdScaleMode = "UNKNOWN"
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
     private var lastSceneSeenAt = 0L
@@ -189,11 +193,19 @@ class GameAccessibilityService : AccessibilityService() {
                     val detection = detectPlayfield(field)
                     if (detection.activeGame && !wasActiveGame) {
                         previousBirdY = -1
+                        previousBirdX = -1
+                        baselineBirdWidth = -1f
+                        baselineBirdHeight = -1f
+                        lastBirdScaleMode = "UNKNOWN"
                         previousBirdAt = 0L
                         lastAutoTapAt = 0L
                         screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
                     } else if (!detection.activeGame && wasActiveGame) {
                         previousBirdY = -1
+                        previousBirdX = -1
+                        baselineBirdWidth = -1f
+                        baselineBirdHeight = -1f
+                        lastBirdScaleMode = "UNKNOWN"
                         previousBirdAt = 0L
                         screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
                     }
@@ -243,6 +255,10 @@ class GameAccessibilityService : AccessibilityService() {
             resetQLearningAttempt()
             gravitySamples.clear()
             previousBirdY = -1
+            previousBirdX = -1
+            baselineBirdWidth = -1f
+            baselineBirdHeight = -1f
+            lastBirdScaleMode = "UNKNOWN"
             previousBirdAt = 0L
             lastAutoTapAt = 0L
             previousObstacleX = -1
@@ -264,6 +280,10 @@ class GameAccessibilityService : AccessibilityService() {
             finishQLearningAttempt(true)
             finishAttemptDiagnostics("GAME_OVER_OR_SCENE_LOST")
             previousBirdY = -1
+            previousBirdX = -1
+            baselineBirdWidth = -1f
+            baselineBirdHeight = -1f
+            lastBirdScaleMode = "UNKNOWN"
             previousBirdAt = 0L
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
         }
@@ -283,7 +303,7 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "$screenStatus • CV ${lastDetectionMs}мс"
     }
 
-    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String,val birdBounds:String="NONE",val pipeBounds:String="NONE",val pipeRuns:String="NONE",val pipeConfidence:Float=0f)
+    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String,val birdBounds:String="NONE",val pipeBounds:String="NONE",val pipeRuns:String="NONE",val pipeConfidence:Float=0f,val birdScale:String="UNKNOWN")
     private fun detectPlayfield(bitmap: Bitmap): Detection {
         val w = bitmap.width
         val h = bitmap.height
@@ -333,10 +353,39 @@ class GameAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        val birdFound = activeGame && birdPixels >= 24 &&
-            maxBirdX - minBirdX >= 12 && maxBirdY - minBirdY >= 18
-        val birdX = if (birdFound) (minBirdX + maxBirdX) / 2 else -1
-        val birdY = if (birdFound) (minBirdY + maxBirdY) / 2 else -1
+        val detectedBirdWidth = (maxBirdX - minBirdX).coerceAtLeast(0)
+        val detectedBirdHeight = (maxBirdY - minBirdY).coerceAtLeast(0)
+        val rawBirdX = if (birdPixels > 0) (minBirdX + maxBirdX) / 2 else -1
+        val rawBirdY = if (birdPixels > 0) (minBirdY + maxBirdY) / 2 else -1
+        val normalBirdFound = activeGame && birdPixels >= 24 &&
+            detectedBirdWidth >= 12 && detectedBirdHeight >= 18
+        // The potion shrinks the avatar by roughly 2–3x. Its sampled blue pixels can fall
+        // below the old 24-pixel threshold, so accept a smaller sprite only when its centre
+        // remains close to the previous frame's avatar location.
+        val closeToPreviousBird = previousBirdX >= 0 && previousBirdY >= 0 &&
+            rawBirdX >= 0 && rawBirdY >= 0 &&
+            kotlin.math.abs(rawBirdX - previousBirdX) <= max(28, (w * 0.06f).toInt()) &&
+            kotlin.math.abs(rawBirdY - previousBirdY) <= max(320, (h * 0.18f).toInt())
+        val reducedBirdFound = activeGame && closeToPreviousBird &&
+            birdPixels >= 3 && detectedBirdWidth >= 3 && detectedBirdHeight >= 5
+        val birdFound = normalBirdFound || reducedBirdFound
+        val birdX = if (birdFound) rawBirdX else -1
+        val birdY = if (birdFound) rawBirdY else -1
+        val baselineKnown = baselineBirdWidth > 0f && baselineBirdHeight > 0f
+        val visuallyShrunk = baselineKnown &&
+            detectedBirdWidth < baselineBirdWidth * 0.72f &&
+            detectedBirdHeight < baselineBirdHeight * 0.72f
+        val birdScale = when {
+            birdFound && (reducedBirdFound && !normalBirdFound || visuallyShrunk) -> "SHRUNK"
+            birdFound -> "NORMAL"
+            else -> "UNKNOWN"
+        }
+        if (birdFound && birdScale == "NORMAL") {
+            baselineBirdWidth = if (baselineBirdWidth > 0f)
+                baselineBirdWidth * 0.85f + detectedBirdWidth * 0.15f else detectedBirdWidth.toFloat()
+            baselineBirdHeight = if (baselineBirdHeight > 0f)
+                baselineBirdHeight * 0.85f + detectedBirdHeight * 0.15f else detectedBirdHeight.toFloat()
+        }
         if (!activeGame) return Detection(message = "Меню / отсчёт • ожидаю игровое поле")
 
         // Pipe body color sampled from the user's recording: muted purple (not orange decoration).
@@ -392,7 +441,9 @@ class GameAccessibilityService : AccessibilityService() {
             return Detection(
                 birdX = birdX, birdY = birdY, activeGame = true,
                 message = if (birdFound) "ИГРА • персонаж x=$birdX y=$birdY • ожидаю трубы"
-                else "ИГРА • счёт распознан, ищу персонажа"
+                else "ИГРА • счёт распознан, ищу персонажа",
+                birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
+                birdScale = birdScale
             )
         }
 
@@ -437,7 +488,8 @@ class GameAccessibilityService : AccessibilityService() {
                 birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
                 pipeBounds = "${nearest.first}..${nearest.second}",
                 pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
-                pipeConfidence = (0.22f + runs.size * 0.09f).coerceAtMost(0.52f)
+                pipeConfidence = (0.22f + runs.size * 0.09f).coerceAtMost(0.52f),
+                birdScale = birdScale
             )
         }
         var gapTop = -1
@@ -459,7 +511,8 @@ class GameAccessibilityService : AccessibilityService() {
                 birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
                 pipeBounds = "${nearest.first}..${nearest.second}",
                 pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
-                pipeConfidence = 0.42f
+                pipeConfidence = 0.42f,
+                birdScale = birdScale
             )
         }
         // The orange crystal tips protrude into the visual gap; shrink it for collision safety.
@@ -475,7 +528,8 @@ class GameAccessibilityService : AccessibilityService() {
             birdBounds = "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY",
             pipeBounds = "${nearest.first}..${nearest.second}",
             pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
-            pipeConfidence = pipeConfidence
+            pipeConfidence = pipeConfidence,
+            birdScale = birdScale
         )
     }
 
@@ -932,6 +986,10 @@ class GameAccessibilityService : AccessibilityService() {
             if (pendingRlState != null || qLearningEpisode.isNotEmpty()) finishQLearningAttempt(true)
             appendRunLog("FRAME state=GAME_OVER msg=" + d.message)
             previousBirdY = -1
+            previousBirdX = -1
+            baselineBirdWidth = -1f
+            baselineBirdHeight = -1f
+            lastBirdScaleMode = "UNKNOWN"
             previousBirdAt = 0L
             previousObstacleX = -1
             previousObstacleAt = 0L
@@ -988,7 +1046,15 @@ class GameAccessibilityService : AccessibilityService() {
             appendRunLog("ACTION manual_tap_detected estimatedFlapV=" + fmt(estimatedFlapVelocity) + " count=" + manualTapCount + " rl_action=FLAP")
         }
         previousBirdY = d.birdY
+        previousBirdX = d.birdX
         previousBirdAt = now
+        if (d.birdScale != "UNKNOWN" && d.birdScale != lastBirdScaleMode) {
+            appendRunLog(
+                "BIRD_SCALE mode=${d.birdScale} bounds=${d.birdBounds} " +
+                    "baseline=${baselineBirdWidth.toInt()}x${baselineBirdHeight.toInt()}"
+            )
+            lastBirdScaleMode = d.birdScale
+        }
         previousVerticalVelocity = velocity
         previousRawVerticalVelocity = rawVelocity
 
@@ -1344,6 +1410,10 @@ class GameAccessibilityService : AccessibilityService() {
         lastGapBottom = -1
         lastTapStatus = "TAP —"
         previousBirdY = -1
+        previousBirdX = -1
+        baselineBirdWidth = -1f
+        baselineBirdHeight = -1f
+        lastBirdScaleMode = "UNKNOWN"
         previousBirdAt = 0L
         lastAutoTapAt = 0L
         previousObstacleX = -1
