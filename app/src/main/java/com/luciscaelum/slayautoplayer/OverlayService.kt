@@ -175,7 +175,7 @@ class OverlayService : Service() {
         val pipe = "T ${GameAccessibilityService.lastObstacleX}"
         val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
         val tap = GameAccessibilityService.lastTapStatus
-        val counts = "A${GameAccessibilityService.autoTapCount} / H${GameAccessibilityService.manualTapCount}"
+        val counts = "A${GameAccessibilityService.autoTapCount} / H${GameAccessibilityService.manualTapCount} • Q${GameAccessibilityService.learnedStateCount}"
         status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts • $tap\nVOL− = STOP"
     }
 
