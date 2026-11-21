@@ -45,6 +45,7 @@ class GameAccessibilityService : AccessibilityService() {
     private val runLogLock = Any()
     private val runLog = ArrayDeque<String>()
     private var runStartedAt = 0L
+    private var attemptCount = 0
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
     private val eventScanTask = Runnable {
@@ -183,12 +184,11 @@ class GameAccessibilityService : AccessibilityService() {
             tapObservationPendingAt = 0L
             autoTapCount = 0
             manualTapCount = 0
-            synchronized(runLogLock) { runLog.clear() }
-            runStartedAt = SystemClock.elapsedRealtime()
-            appendRunLog("=== НАЧАЛО ПОПЫТКИ ===")
+            attemptCount++
+            appendRunLog("=== НАЧАЛО ПОПЫТКИ #$attemptCount ===")
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
-            appendRunLog("=== КОНЕЦ ПОПЫТКИ ===")
+            appendRunLog("=== КОНЕЦ ПОПЫТКИ #$attemptCount ===")
             previousBirdY = -1
             previousBirdAt = 0L
             screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
@@ -209,7 +209,7 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "$screenStatus • CV ${lastDetectionMs}мс"
     }
 
-    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String)
+    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String,val birdBounds:String="NONE",val pipeBounds:String="NONE",val pipeRuns:String="NONE")
     private fun detectPlayfield(bitmap: Bitmap): Detection {
         val w = bitmap.width
         val h = bitmap.height
@@ -355,7 +355,10 @@ class GameAccessibilityService : AccessibilityService() {
             return Detection(
                 birdX = birdX, birdY = birdY, obstacleX = pipeLeadingEdgeX,
                 activeGame = true,
-                message = "ТРУБА x=$pipeLeadingEdgeX • ищу верхнюю/нижнюю часть"
+                message = "ТРУБА x=$pipeLeadingEdgeX • ищу верхнюю/нижнюю часть",
+                birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
+                pipeBounds = "${nearest.first}..${nearest.second}",
+                pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" }
             )
         }
         var gapTop = -1
@@ -373,7 +376,10 @@ class GameAccessibilityService : AccessibilityService() {
             return Detection(
                 birdX = birdX, birdY = birdY, obstacleX = pipeLeadingEdgeX,
                 activeGame = true,
-                message = "ТРУБА x=$pipeLeadingEdgeX • просвет не подтверждён"
+                message = "ТРУБА x=$pipeLeadingEdgeX • просвет не подтверждён",
+                birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
+                pipeBounds = "${nearest.first}..${nearest.second}",
+                pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" }
             )
         }
         // The orange crystal tips protrude into the visual gap; shrink it for collision safety.
@@ -382,7 +388,10 @@ class GameAccessibilityService : AccessibilityService() {
         gapBottom = (gapBottom - safety).coerceAtLeast(gapTop + 1)
         return Detection(
             birdX, birdY, pipeLeadingEdgeX, gapTop, gapBottom, true,
-            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeLeadingEdgeX • ПРОХОД $gapTop..$gapBottom"
+            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeLeadingEdgeX • ПРОХОД $gapTop..$gapBottom",
+            birdBounds = "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY",
+            pipeBounds = "${nearest.first}..${nearest.second}",
+            pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" }
         )
     }
 
@@ -511,7 +520,15 @@ class GameAccessibilityService : AccessibilityService() {
         val shouldTap = distanceWindow && timeToPipe > reactionMs &&
             predictedTooLow && tapTrajectoryFits && tapImprovesPath
 
-        appendRunLog("FRAME bird=${d.birdY} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)} pipeX=${d.obstacleX} gap=${gapTop.toInt()}..${gapBottom.toInt()} dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} noTap=${noTapPrediction.toInt()} afterTap=${afterTapPrediction.toInt()} safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)} decision=" + if (shouldTap) "TAP" else "WAIT")
+        val decisionReason = when {
+            !distanceWindow -> "OUT_OF_RANGE"
+            timeToPipe <= reactionMs -> "TOO_LATE"
+            !predictedTooLow -> "PATH_SAFE"
+            !tapTrajectoryFits -> "TAP_WOULD_MISS"
+            !tapImprovesPath -> "NO_IMPROVEMENT"
+            else -> "TAP"
+        }
+        appendRunLog("FRAME bird=${d.birdY} box=${d.birdBounds} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)} pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} gap=${gapTop.toInt()}..${gapBottom.toInt()} dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} noTap=${noTapPrediction.toInt()} afterTap=${afterTapPrediction.toInt()} safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)} decision=$decisionReason")
         if (shouldTap) {
             screenStatus = "КОРРЕКЦИЯ • без тапа ${noTapPrediction.toInt()} • с тапом ${afterTapPrediction.toInt()} • проём $gapTop..$gapBottom • v ${"%.2f".format(velocity)}"
             if (tap(tapX, tapY)) {
@@ -540,6 +557,10 @@ class GameAccessibilityService : AccessibilityService() {
         manual = false
         paused = false
         monitoring = true
+        synchronized(runLogLock) { runLog.clear() }
+        runStartedAt = SystemClock.elapsedRealtime()
+        attemptCount = 0
+        appendRunLog("=== СЕССИЯ МОНИТОРИНГА ===")
         wasActiveGame = false
         lastCaptureStartedAt = 0L
         nextScreenshotAllowedAt = 0L
@@ -621,7 +642,7 @@ class GameAccessibilityService : AccessibilityService() {
         val elapsed = if (runStartedAt > 0L) SystemClock.elapsedRealtime() - runStartedAt else 0L
         val line = "$elapsed ms | $message"
         synchronized(runLogLock) {
-            if (runLog.size >= 1200) runLog.removeFirst()
+            if (runLog.size >= 2500) runLog.removeFirst()
             runLog.addLast(line)
         }
     }
