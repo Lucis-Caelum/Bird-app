@@ -1103,17 +1103,67 @@ class GameAccessibilityService : AccessibilityService() {
                 attemptLastAction = "WAIT"
                 appendRunLog("ACTION_SPACE selected=WAIT reason=PIPE_GAP_UNCONFIRMED")
             } else if (!hasSeenPipeThisAttempt) {
-                // Before the first pipe appears, keep the natural ballistic trajectory.
-                // The first correction will be planned from an actual detected gap.
-                attemptLastDecision = "WAIT_FIRST_PIPE"
-                attemptLastAction = "WAIT"
-                attemptWaitDecisions++
-                appendRunLog(
-                    "ACTION_SPACE selected=WAIT reason=WAIT_FOR_FIRST_PIPE " +
-                        "y=${d.birdY} v=${fmt(velocity)} natural300=" +
-                        predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, 300f, floatArrayOf()).toInt()
+                // Stabilize the bird before the first obstacle is visible. Waiting for a pipe
+                // leaves too little time to recover when the bird is already falling.
+                // Use a broad central corridor and a short one-flap forecast; after each tap,
+                // wait for measured physics feedback and decide again from the next frame.
+                val prepipeHorizon = 260f
+                val prepipeTapAt = 65f
+                val prepipeUpper = fieldHeight * 0.42f
+                val prepipeLower = fieldHeight * 0.60f
+                val predictedWithoutTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, prepipeHorizon, floatArrayOf()
                 )
-                screenStatus = "ОЖИДАЮ ПЕРВУЮ ТРУБУ • естественная траектория"
+                val predictedWithTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, prepipeHorizon, floatArrayOf(prepipeTapAt)
+                )
+                val prepipeTapSpacingReady = lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L
+                val prepipeNeedsLift = predictedWithoutTap > prepipeLower && velocity > -0.10f
+                val prepipeTapKeepsCentral = predictedWithTap in prepipeUpper..prepipeLower
+                val prepipeTapImproves = predictedWithoutTap - predictedWithTap >= max(18f, fieldHeight * 0.012f)
+                val prepipeCanTap = !tapFeedbackPending && !gestureInFlight.get() && prepipeTapSpacingReady
+                val shouldPrepipeTap = prepipeCanTap && prepipeNeedsLift &&
+                    prepipeTapKeepsCentral && prepipeTapImproves
+
+                val prepipeReason = when {
+                    tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
+                    gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
+                    !prepipeTapSpacingReady -> "INTERTAP_SPACING"
+                    !prepipeNeedsLift -> "PREDICTED_PATH_IN_CORRIDOR_OR_RISING"
+                    !prepipeTapKeepsCentral -> "FLAP_WOULD_OVERSHOOT_OR_TOO_LATE"
+                    !prepipeTapImproves -> "FLAP_NOT_USEFUL"
+                    else -> "PREPIPE_STABILIZATION"
+                }
+
+                if (shouldPrepipeTap && tap(tapX, tapY, "PREPIPE", velocity, d.birdY)) {
+                    lastAutoTapAt = now
+                    autoTapCount++
+                    attemptAutoTaps++
+                    attemptFlapDecisions++
+                    attemptLastAction = "FLAP_PREPIPE"
+                    attemptLastDecision = "PREPIPE_FLAP"
+                    appendRunLog(
+                        "PREPIPE_CONTROL y=${d.birdY} v=${fmt(velocity)} " +
+                            "wait${prepipeHorizon.toInt()}=${predictedWithoutTap.toInt()} " +
+                            "flap${prepipeHorizon.toInt()}=${predictedWithTap.toInt()} " +
+                            "band=${prepipeUpper.toInt()}..${prepipeLower.toInt()} selected=FLAP"
+                    )
+                    appendRunLog("ACTION_SPACE selected=FLAP reason=PREPIPE_STABILIZATION")
+                    screenStatus = "СТАБИЛИЗАЦИЯ ДО ПЕРВОЙ ТРУБЫ • y=${d.birdY}"
+                } else {
+                    attemptWaitDecisions++
+                    attemptLastDecision = if (shouldPrepipeTap) "PREPIPE_TAP_REJECTED" else "PREPIPE_WAIT"
+                    attemptLastAction = "WAIT_PREPIPE"
+                    appendRunLog(
+                        "PREPIPE_CONTROL y=${d.birdY} v=${fmt(velocity)} " +
+                            "wait${prepipeHorizon.toInt()}=${predictedWithoutTap.toInt()} " +
+                            "flap${prepipeHorizon.toInt()}=${predictedWithTap.toInt()} " +
+                            "band=${prepipeUpper.toInt()}..${prepipeLower.toInt()} " +
+                            "selected=WAIT reason=${if (shouldPrepipeTap) "TAP_REJECTED" else prepipeReason}"
+                    )
+                    appendRunLog("ACTION_SPACE selected=WAIT reason=${if (shouldPrepipeTap) "TAP_REJECTED" else prepipeReason}")
+                    screenStatus = "СТАБИЛИЗАЦИЯ ДО ПЕРВОЙ ТРУБЫ • прогноз=${predictedWithoutTap.toInt()}"
+                }
             } else {
                 // Between pipes, WAIT is an explicit ballistic action; FLAP is evaluated
                 // against it before execution. Pickups are deliberately ignored.
@@ -1319,10 +1369,14 @@ class GameAccessibilityService : AccessibilityService() {
         val bestSafePlan = allTapPlans
             .filter { it.worstMiss <= 0f }
             .minByOrNull { it.score }
+        // A "rescue" that still misses the safe opening by hundreds of pixels is not
+        // actionable. Keep same-side recovery only for plans already close to the safe window.
+        val maxUsefulRescueMiss = max(gapHeight * 0.30f, fieldHeight * 0.06f)
         val bestRescuePlan = if (bestSafePlan == null) {
             allTapPlans
                 .filter {
-                    it.worstMiss + minUsefulImprovement < waitActionMiss &&
+                    it.worstMiss <= maxUsefulRescueMiss &&
+                        it.worstMiss + minUsefulImprovement < waitActionMiss &&
                         doesNotReverseIntoOppositeCollision(it)
                 }
                 .minByOrNull { it.score }
