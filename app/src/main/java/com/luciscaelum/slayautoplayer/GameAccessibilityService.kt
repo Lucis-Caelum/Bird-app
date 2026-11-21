@@ -877,16 +877,21 @@ class GameAccessibilityService : AccessibilityService() {
         val qWait = qEntry?.values?.get(RL_WAIT) ?: 0f
         val qFlapVisits = qEntry?.visits?.get(RL_FLAP) ?: 0
         val qWaitVisits = qEntry?.visits?.get(RL_WAIT) ?: 0
-        // Physics shield is authoritative; Q-Learning can refine safe choices but cannot force an unsafe flap.
-        val shouldTap = distanceWindow && timeToPipe > reactionMs && safeWindowValid && noTapPrediction >= safeTop &&
-            (fallbackAction == RL_FLAP || (qAction == RL_FLAP && qCanFlapWithoutRisk))
+        // The shield forces a correction only when waiting would leave a material miss.
+        // Otherwise Q-Learning may choose either action, but only inside a fully safe envelope.
+        val safetyMissThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
+        val safetyRequiresTap = fallbackAction == RL_FLAP &&
+            noTapMissDistance > safetyMissThreshold
+        val shouldTap = distanceWindow && timeToPipe > reactionMs && safeWindowValid &&
+            noTapPrediction >= safeTop &&
+            (safetyRequiresTap || (qAction == RL_FLAP && qCanFlapWithoutRisk))
 
         val decisionReason = when {
             !distanceWindow -> "OUT_OF_RANGE"
             timeToPipe <= reactionMs -> "TOO_LATE"
             !safeWindowValid -> "INVALID_SAFE_WINDOW"
             noTapPrediction < safeTop -> "TOO_HIGH_WAIT"
-            shouldTap && fallbackAction == RL_FLAP -> "SAFETY_TAP"
+            shouldTap && safetyRequiresTap -> "SAFETY_TAP"
             shouldTap -> "QLEARNING_TAP"
             predictedTooLow && !tapResidualAcceptable -> "TAP_RESIDUAL_TOO_LARGE"
             predictedTooLow && !tapSafe -> "TAP_NOT_SAFE"
@@ -900,7 +905,9 @@ class GameAccessibilityService : AccessibilityService() {
                 " afterTap=" + afterTapPrediction.toInt() + " miss=" + noTapMissDistance.toInt() + "/" + afterTapMissDistance.toInt() +
                 " residualLimit=" + maxPostTapResidual.toInt() + " safe=" + safeTop.toInt() + ".." + safeBottom.toInt() + " flapV=" + fmt(estimatedFlapVelocity) +
                 " state=" + stateKey + " q=" + fmt(qFlap) + "/" + fmt(qWait) + " visits=" + qFlapVisits + "/" + qWaitVisits +
-                " tableRev=" + qLearningRevision + " pipePassed=" + pipePassed + " decision=" + decisionReason
+                " tableRev=" + qLearningRevision + " safetyRequired=" + safetyRequiresTap +
+                " qAction=" + if (qAction == RL_FLAP) "FLAP" else "WAIT" +
+                " pipePassed=" + pipePassed + " decision=" + decisionReason
         )
         var actualAction = RL_WAIT
         if (shouldTap) {
