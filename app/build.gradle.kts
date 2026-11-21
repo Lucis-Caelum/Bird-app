@@ -9,8 +9,8 @@ android {
         applicationId = "com.luciscaelum.slayautoplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "0.33.0"
+        versionCode = 38
+        versionName = "0.34.0"
     }
     signingConfigs {
         create("birdPlay") {
