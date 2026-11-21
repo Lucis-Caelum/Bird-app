@@ -1044,10 +1044,15 @@ class GameAccessibilityService : AccessibilityService() {
         val zeroMeanMiss = zeroMisses.average().toFloat()
 
         val bestByTapCount = arrayOfNulls<TapPlan>(5)
-        // The first impulse is modeled at the gesture's measured ~65 ms completion latency.
-        // Later taps are explored across several intervals because their cumulative lift differs.
-        val firstTapDelays = floatArrayOf(reactionMs)
-        val interTapIntervals = floatArrayOf(150f, 190f, 230f, 270f, 310f, 350f, 390f)
+        // Android captures every ~80 ms and gesture completion/feedback must be observed before
+        // another tap. Use intervals aligned to that cadence so the selected spacing can be executed.
+        val interTapIntervals = floatArrayOf(160f, 240f, 320f, 400f)
+        val elapsedSinceLastImpulse = if (lastAutoTapAt > 0L)
+            (now - lastAutoTapAt).toFloat() - reactionMs else Float.POSITIVE_INFINITY
+        val firstTapDelays = if (lastAutoTapAt > 0L) {
+            interTapIntervals.map { (it - elapsedSinceLastImpulse).coerceAtLeast(reactionMs) }
+                .distinct().sorted().toFloatArray()
+        } else floatArrayOf(reactionMs)
         var schedulesEvaluated = 0
 
         fun evaluateSchedule(schedule: List<Float>) {
@@ -1124,8 +1129,9 @@ class GameAccessibilityService : AccessibilityService() {
         // Require credible gap geometry except in a close-range emergency.
         val gapTrusted = d.pipeConfidence >= 0.55f ||
             (timeToPipe <= 250f && d.pipeConfidence >= 0.42f)
+        val tapWindowReady = firstTapDelay <= reactionMs + 20f
         val shouldTap = distanceWindow && safeWindowValid && gapTrusted && !tapFeedbackPending &&
-            zeroWorstMiss > safetyMissThreshold && recoveryPossible
+            tapWindowReady && zeroWorstMiss > safetyMissThreshold && recoveryPossible
 
         val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
         val fallbackAction = if (shouldTap) RL_FLAP else RL_WAIT
@@ -1146,6 +1152,7 @@ class GameAccessibilityService : AccessibilityService() {
             !safeWindowValid -> "INVALID_SAFE_WINDOW"
             !gapTrusted -> "LOW_GAP_CONFIDENCE_WAIT"
             tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
+            recoveryPossible && !tapWindowReady -> "WAIT_INTERTAP_INTERVAL"
             zeroWorstMiss <= safetyMissThreshold -> "PATH_SAFE_WAIT"
             recoveryPossible && bestPlanCount >= 3 -> "RECOVERY_PLAN_${bestPlanCount}_TAPS"
             recoveryPossible -> "RECOVERY_PLAN_${bestPlanCount}_TAP"
@@ -1163,7 +1170,8 @@ class GameAccessibilityService : AccessibilityService() {
                 " planEntry/Mid/Exit=${bestPlanEntryY.toInt()}/${bestPlanMiddleY.toInt()}/${bestPlanExitY.toInt()}" +
                 " miss0/plan=${zeroWorstMiss.toInt()}/${bestPlanMiss.toInt()}" +
                 " safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)}" +
-                " candidates={$scenarioText} schedules=$schedulesEvaluated feedbackPending=$tapFeedbackPending" +
+                " candidates={$scenarioText} schedules=$schedulesEvaluated elapsedSinceImpulse=${if (lastAutoTapAt > 0L) elapsedSinceLastImpulse.toInt() else -1}ms" +
+                " nextImpulseDelay=${firstTapDelay.toInt()}ms intervalReady=$tapWindowReady feedbackPending=$tapFeedbackPending" +
                 " fallback=${if (fallbackAction == RL_FLAP) "FLAP" else "WAIT"}" +
                 " q=${fmt(qFlap)}/${fmt(qWait)} visits=$qFlapVisits/$qWaitVisits qAction=${if (qAction == RL_FLAP) "FLAP" else "WAIT"}" +
                 " recoveryPossible=$recoveryPossible predictedCollision=${zeroWorstMiss > 0f} " +
