@@ -1140,8 +1140,67 @@ class GameAccessibilityService : AccessibilityService() {
             )
             if (pipePassed) rewardPipePassWithoutGap(now)
 
-            val pipeVisibleButUnconfirmed = d.obstacleX >= 0
-            if (pipeVisibleButUnconfirmed) {
+            val pipeRightEdge = d.pipeBounds.substringAfter("..").toIntOrNull() ?: -1
+            val birdRightEdge = d.birdBounds.substringBefore(',').substringAfter("..").toIntOrNull()
+                ?: (d.birdX + fieldWidth * 0.018f).toInt()
+            // Leading edge crossed bird centre; keep the measured gap active until the
+            // trailing edge clears the sprite. Never freeze control in GAP_UNCONFIRMED.
+            val pipeCrossingWithKnownGap = d.obstacleX >= 0 &&
+                d.obstacleX <= d.birdX &&
+                d.gapTop >= 0 && d.gapBottom > d.gapTop &&
+                pipeRightEdge >= birdRightEdge - fieldWidth * 0.02f
+            if (pipeCrossingWithKnownGap) {
+                val crossingGapHeight = (d.gapBottom - d.gapTop).toFloat()
+                val crossingSafeTop = d.gapTop + crossingGapHeight * 0.18f
+                val crossingSafeBottom = d.gapBottom - crossingGapHeight * 0.18f
+                val crossingHorizon = 180f
+                val crossingWithoutTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf()
+                )
+                val crossingWithTap = predictTrajectoryAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf(65f)
+                )
+                val crossingNeedsCorrection = crossingWithoutTap < crossingSafeTop ||
+                    crossingWithoutTap > crossingSafeBottom
+                val crossingTapSafe = crossingWithTap in crossingSafeTop..crossingSafeBottom
+                val crossingTapImproves = abs(crossingWithTap - (crossingSafeTop + crossingSafeBottom) * 0.5f) <
+                    abs(crossingWithoutTap - (crossingSafeTop + crossingSafeBottom) * 0.5f)
+                val crossingCanTap = !tapFeedbackPending && !gestureInFlight.get() &&
+                    (lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L)
+                val shouldCrossingTap = crossingCanTap && crossingNeedsCorrection &&
+                    crossingTapSafe && crossingTapImproves
+                appendRunLog(
+                    "POST_PIPE_CONTROL trackId=$activePipeTrackId frontX=${d.obstacleX} " +
+                        "trailingX=$pipeRightEdge birdRight=$birdRightEdge gap=${d.gapTop}..${d.gapBottom} " +
+                        "safe=${crossingSafeTop.toInt()}..${crossingSafeBottom.toInt()} " +
+                        "wait180=${crossingWithoutTap.toInt()} flap180=${crossingWithTap.toInt()} " +
+                        "selected=${if (shouldCrossingTap) "FLAP" else "WAIT"}"
+                )
+                if (shouldCrossingTap && tap(tapX, tapY, "POST_PIPE", velocity, d.birdY)) {
+                    lastAutoTapAt = now
+                    autoTapCount++
+                    attemptAutoTaps++
+                    attemptFlapDecisions++
+                    attemptLastAction = "FLAP_POST_PIPE"
+                    attemptLastDecision = "POST_PIPE_GAP_CORRECTION"
+                    appendRunLog("ACTION_SPACE selected=FLAP reason=POST_PIPE_GAP_CORRECTION")
+                    screenStatus = "ПРОХОЖУ ТРУБУ • корректирую высоту"
+                } else {
+                    attemptWaitDecisions++
+                    attemptLastAction = "WAIT_POST_PIPE"
+                    attemptLastDecision = "POST_PIPE_GAP_HOLD"
+                    val reason = when {
+                        tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
+                        gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
+                        !crossingNeedsCorrection -> "PREDICTED_PATH_IN_GAP"
+                        !crossingTapSafe -> "TAP_WOULD_LEAVE_GAP"
+                        !crossingTapImproves -> "TAP_NOT_IMPROVING"
+                        else -> "TAP_SPACING_OR_REJECTED"
+                    }
+                    appendRunLog("ACTION_SPACE selected=WAIT reason=$reason")
+                    screenStatus = "ПРОХОЖУ ТРУБУ • удерживаю безопасную траекторию"
+                }
+            } else if (d.obstacleX >= 0) {
                 // If a real obstacle is visible but its gap is uncertain, do not mistake it
                 // for the open interval between pipes and do not blindly flap.
                 screenStatus = "ТРУБА x=${d.obstacleX} • уточняю просвет"
