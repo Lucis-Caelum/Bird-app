@@ -369,7 +369,7 @@ class GameAccessibilityService : AccessibilityService() {
         }
         // Real pipe bodies span roughly 10–20% of the field width. Small floating pickups
         // and decorative crystals are narrower and must never become obstacle candidates.
-        val minPipeWidth = (w * 0.09f).toInt().coerceAtLeast(1)
+        val minPipeWidth = (w * 0.11f).toInt().coerceAtLeast(1)
         val groups = mutableListOf<Pair<Int, Int>>()
         var start = -1
         for (i in 0 until sampleW) {
