@@ -58,8 +58,15 @@ class GameAccessibilityService : AccessibilityService() {
     private var pendingRlAction = RL_WAIT
     private var pendingRlAt = 0L
     private var lastTrackedPipeX = -1
+    private var lastTrackedPipeAt = 0L
     private var trackedPipeNearBird = false
     private var qLearningPipePasses = 0
+    private var qLearningRevision = 0L
+    private var qLearningUpdatedAt = 0L
+    private var qLearningChecksum = "EMPTY"
+    private var qLearningTotalPipePasses = 0
+    private var qLearningTotalEpisodes = 0
+    private var qLearningMetaStatus = "NEW"
     private var earlyLaunchTapUsed = false
     private val gravitySamples = ArrayDeque<Float>()
     private var lastCaptureStartedAt = 0L
@@ -416,35 +423,89 @@ class GameAccessibilityService : AccessibilityService() {
         )
     }
 
+    private fun tableChecksum(serialized: String): String =
+        Integer.toHexString(serialized.hashCode())
+
     private fun ensureQLearningLoaded() {
         if (qLearningLoaded) return
         qLearningLoaded = true
-        val saved = getSharedPreferences("bird_play_learning", MODE_PRIVATE).getString("q_table", null)
-        if (saved.isNullOrBlank()) { appendRunLog("RL table empty; online learning enabled"); return }
+        val prefs = getSharedPreferences("bird_play_learning", MODE_PRIVATE)
+        val saved = prefs.getString("q_table", null)
+        val savedMeta = prefs.getString("q_table_meta", null)
+        if (saved.isNullOrBlank()) {
+            qLearningMetaStatus = if (savedMeta.isNullOrBlank()) "NEW" else "TABLE_MISSING"
+            val meta = try { JSONObject(savedMeta ?: "{}") } catch (_: Exception) { JSONObject() }
+            qLearningRevision = meta.optLong("revision", 0L)
+            qLearningUpdatedAt = meta.optLong("updated_at", 0L)
+            qLearningTotalPipePasses = meta.optInt("total_pipe_passes", 0)
+            qLearningTotalEpisodes = meta.optInt("total_episodes", 0)
+            learnedStateCount = 0
+            learnedRevision = qLearningRevision
+            learnedPipeCount = qLearningTotalPipePasses
+            learnedUpdatedAt = qLearningUpdatedAt
+            learnedChecksum = "EMPTY"
+            appendRunLog("RL_TABLE_LOAD status=" + qLearningMetaStatus +
+                " revision=" + qLearningRevision + " states=0 previousChecksum=" +
+                meta.optString("checksum", "NONE") + " backup_or_data_restore_required=" + (qLearningMetaStatus == "TABLE_MISSING"))
+            return
+        }
         try {
+            val meta = try { JSONObject(savedMeta ?: "{}") } catch (_: Exception) { JSONObject() }
+            val actualChecksum = tableChecksum(saved)
+            val expectedChecksum = meta.optString("checksum", "")
+            val checksumMatches = expectedChecksum.isBlank() || expectedChecksum == actualChecksum
+            val rewardSchema = meta.optInt("reward_schema", 0)
             val json = JSONObject(saved)
             val keys = json.keys()
             while (keys.hasNext()) {
                 val key = keys.next()
                 val row = json.optJSONArray(key) ?: continue
                 if (row.length() < 4) continue
+                val scale = if (rewardSchema < 2) 0.02f else 1f
                 qLearningTable[key] = QEntry(
-                    floatArrayOf(row.optDouble(0, 0.0).toFloat(), row.optDouble(1, 0.0).toFloat()),
+                    floatArrayOf(
+                        row.optDouble(0, 0.0).toFloat() * scale,
+                        row.optDouble(1, 0.0).toFloat() * scale
+                    ),
                     intArrayOf(row.optInt(2, 0), row.optInt(3, 0)),
                     row.optInt(4, 0) != 0
                 )
             }
+            qLearningRevision = meta.optLong("revision", 1L)
+            qLearningUpdatedAt = meta.optLong("updated_at", 0L)
+            qLearningTotalPipePasses = meta.optInt("total_pipe_passes", 0)
+            qLearningTotalEpisodes = meta.optInt("total_episodes", 0)
+            qLearningChecksum = actualChecksum
+            qLearningMetaStatus = when {
+                !checksumMatches -> "CHECKSUM_MISMATCH"
+                savedMeta.isNullOrBlank() -> "LEGACY_TABLE"
+                else -> "RESTORED"
+            }
             learnedStateCount = qLearningTable.size
-            appendRunLog("RL table loaded states=" + qLearningTable.size)
+            learnedRevision = qLearningRevision
+            learnedPipeCount = qLearningTotalPipePasses
+            learnedUpdatedAt = qLearningUpdatedAt
+            learnedChecksum = actualChecksum
+            appendRunLog("RL_TABLE_LOAD status=" + qLearningMetaStatus +
+                " revision=" + qLearningRevision + " states=" + qLearningTable.size +
+                " episodes=" + qLearningTotalEpisodes + " totalPipes=" + qLearningTotalPipePasses +
+                " updatedAt=" + qLearningUpdatedAt + " checksum=" + actualChecksum +
+                " checksumMatches=" + checksumMatches)
+            if (rewardSchema < 2) {
+                appendRunLog("RL_TABLE_MIGRATION reward_schema=2 valueScale=0.02 oldStatesPreserved=true")
+                persistQLearningTable()
+            }
         } catch (e: Exception) {
             qLearningTable.clear()
-            appendRunLog("RL table load error=" + e.javaClass.simpleName)
+            qLearningMetaStatus = "CORRUPT"
+            learnedStateCount = 0
+            appendRunLog("RL_TABLE_LOAD status=CORRUPT error=" + e.javaClass.simpleName)
         }
     }
 
     private fun persistQLearningTable() {
         learnedStateCount = qLearningTable.size
-        learnedPipeCount = qLearningPipePasses
+        learnedPipeCount = qLearningTotalPipePasses
         try {
             val json = JSONObject()
             for ((state, entry) in qLearningTable) {
@@ -452,8 +513,45 @@ class GameAccessibilityService : AccessibilityService() {
                     .put(entry.visits[0]).put(entry.visits[1]).put(if (entry.safeExploreTried) 1 else 0)
                 json.put(state, row)
             }
-            getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit().putString("q_table", json.toString()).apply()
-        } catch (e: Exception) { appendRunLog("RL table save error=" + e.javaClass.simpleName) }
+            val serialized = json.toString()
+            val checksum = tableChecksum(serialized)
+            val revision = qLearningRevision + 1L
+            val updatedAt = System.currentTimeMillis()
+            val meta = JSONObject()
+                .put("schema", 1)
+                .put("reward_schema", 2)
+                .put("revision", revision)
+                .put("updated_at", updatedAt)
+                .put("states", qLearningTable.size)
+                .put("total_pipe_passes", qLearningTotalPipePasses)
+                .put("total_episodes", qLearningTotalEpisodes)
+                .put("checksum", checksum)
+            val committed = getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
+                .putString("q_table", serialized)
+                .putString("q_table_meta", meta.toString())
+                .commit()
+            if (committed) {
+                qLearningRevision = revision
+                qLearningUpdatedAt = updatedAt
+                qLearningChecksum = checksum
+                qLearningMetaStatus = "SAVED"
+                learnedRevision = revision
+                learnedUpdatedAt = updatedAt
+                learnedChecksum = checksum
+                learnedStateCount = qLearningTable.size
+                learnedPipeCount = qLearningTotalPipePasses
+                appendRunLog("RL_TABLE_SAVED revision=" + revision + " states=" + qLearningTable.size +
+                    " episodes=" + qLearningTotalEpisodes + " totalPipes=" + qLearningTotalPipePasses +
+                    " checksum=" + checksum + " commit=OK")
+            } else {
+                qLearningMetaStatus = "SAVE_FAILED"
+                appendRunLog("RL_TABLE_SAVED revision=" + revision + " states=" + qLearningTable.size +
+                    " checksum=" + checksum + " commit=FAILED")
+            }
+        } catch (e: Exception) {
+            qLearningMetaStatus = "SAVE_ERROR"
+            appendRunLog("RL table save error=" + e.javaClass.simpleName)
+        }
     }
 
     private fun resetQLearningAttempt() {
@@ -461,6 +559,7 @@ class GameAccessibilityService : AccessibilityService() {
         pendingRlState = null
         pendingRlAt = 0L
         lastTrackedPipeX = -1
+        lastTrackedPipeAt = 0L
         trackedPipeNearBird = false
         qLearningPipePasses = 0
         earlyLaunchTapUsed = false
@@ -468,10 +567,10 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun encodeQLearningState(velocity: Float, timeToPipe: Float, targetOffset: Float, gapHeight: Float, fieldHeight: Int): String {
         val normalizedVelocity = velocity * 1000f / fieldHeight.coerceAtLeast(1)
-        val velocityBin = (normalizedVelocity / 0.30f).roundToInt().coerceIn(-10, 12)
-        val timeBin = (timeToPipe / 120f).roundToInt().coerceIn(0, 14)
-        val verticalBin = ((targetOffset / gapHeight.coerceAtLeast(1f)) / 0.15f).roundToInt().coerceIn(-10, 10)
-        return velocityBin.toString() + ":" + timeBin.toString() + ":" + verticalBin.toString()
+        val velocityBin = (normalizedVelocity / 0.45f).roundToInt().coerceIn(-7, 8)
+        val timeBin = (timeToPipe / 180f).roundToInt().coerceIn(0, 9)
+        val verticalBin = ((targetOffset / gapHeight.coerceAtLeast(1f)) / 0.25f).roundToInt().coerceIn(-6, 6)
+        return "v2:" + velocityBin + ":" + timeBin + ":" + verticalBin
     }
 
     private fun qLearningChoice(state: String, fallback: Int, allowSafeExploration: Boolean): Int {
@@ -491,7 +590,7 @@ class GameAccessibilityService : AccessibilityService() {
         val previousState = pendingRlState
         if (previousState != null) {
             val elapsed = (now - pendingRlAt).coerceIn(30L, 240L).toFloat()
-            val reward = 0.5f * (elapsed / 80f) + if (pipePassed) 5f else 0f
+            val reward = 0.08f * (elapsed / 80f) + if (pipePassed) 8f else 0f
             qLearningEpisode.add(QTransition(previousState, pendingRlAction, reward, state))
             if (pipePassed) { updateQLearningEpisode("PIPE"); qLearningEpisode.clear() }
             else if (qLearningEpisode.size >= 1800) { updateQLearningEpisode("CHUNK"); qLearningEpisode.clear() }
@@ -503,10 +602,11 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun finishQLearningAttempt(death: Boolean) {
         val state = pendingRlState
-        if (death && state != null) qLearningEpisode.add(QTransition(state, pendingRlAction, -1000f, null))
+        if (death && state != null) qLearningEpisode.add(QTransition(state, pendingRlAction, -10f, null))
         pendingRlState = null
         pendingRlAt = 0L
         if (qLearningEpisode.isNotEmpty()) {
+            if (death) qLearningTotalEpisodes++
             updateQLearningEpisode(if (death) "DEATH" else "STOP")
             qLearningEpisode.clear()
         }
@@ -518,9 +618,9 @@ class GameAccessibilityService : AccessibilityService() {
         for (transition in qLearningEpisode.asReversed()) {
             val entry = qLearningTable.getOrPut(transition.state) { QEntry() }
             val nextValue = transition.nextState?.let { next -> qLearningTable[next]?.values?.maxOrNull() ?: 0f } ?: 0f
-            val target = transition.reward + nextValue
+            val target = transition.reward + 0.92f * nextValue
             val action = transition.action.coerceIn(RL_FLAP, RL_WAIT)
-            entry.values[action] += 0.20f * (target - entry.values[action])
+            entry.values[action] += 0.22f * (target - entry.values[action])
             entry.visits[action] = (entry.visits[action] + 1).coerceAtMost(1_000_000)
         }
         while (qLearningTable.size > 5000) {
@@ -531,17 +631,49 @@ class GameAccessibilityService : AccessibilityService() {
         appendRunLog("RL BACKWARD_UPDATE reason=" + reason + " states=" + qLearningEpisode.size + " table=" + qLearningTable.size + " pipes=" + qLearningPipePasses)
     }
 
-    private fun trackPipePass(d: Detection, fieldWidth: Int): Boolean {
+    private fun trackPipePass(d: Detection, fieldWidth: Int, now: Long): Boolean {
+        val currentX = d.obstacleX
+        if (currentX < 0) return false
+        val staleTrack = lastTrackedPipeAt > 0L && now - lastTrackedPipeAt > 1200L
+        if (staleTrack) {
+            lastTrackedPipeX = -1
+            trackedPipeNearBird = false
+        }
         val oldX = lastTrackedPipeX
-        val passed = oldX >= 0 && trackedPipeNearBird && d.obstacleX > oldX + fieldWidth * 0.22f
+        val previousWasNear = trackedPipeNearBird
+        // The detector always selects the nearest pipe still ahead. When it disappears,
+        // the next pipe appears farther right; that jump is a pipe-change event, not motion.
+        val changedToNextPipe = oldX >= 0 && currentX > oldX + fieldWidth * 0.14f
+        val passed = changedToNextPipe && previousWasNear &&
+            oldX < d.birdX + fieldWidth * 0.24f
+        if (changedToNextPipe) trackedPipeNearBird = false
+        val nearBirdTrackingZone = currentX <= d.birdX + fieldWidth * 0.24f &&
+            currentX >= d.birdX - fieldWidth * 0.20f
+        if (nearBirdTrackingZone) trackedPipeNearBird = true
         if (passed) {
             qLearningPipePasses++
-            trackedPipeNearBird = false
-            appendRunLog("EVENT pipe_passed count=" + qLearningPipePasses + " nextPipeX=" + d.obstacleX)
+            qLearningTotalPipePasses++
+            learnedPipeCount = qLearningTotalPipePasses
+            appendRunLog("EVENT pipe_passed attempt=" + qLearningPipePasses +
+                " total=" + qLearningTotalPipePasses + " previousX=" + oldX +
+                " nextPipeX=" + currentX + " track=NEXT_PIPE_SWITCH")
         }
-        if (d.obstacleX < d.birdX + fieldWidth * 0.20f) trackedPipeNearBird = true
-        lastTrackedPipeX = d.obstacleX
+        lastTrackedPipeX = currentX
+        lastTrackedPipeAt = now
         return passed
+    }
+
+    private fun rewardPipePassWithoutGap(now: Long) {
+        val state = pendingRlState ?: run {
+            appendRunLog("RL pipe_passed without pending state")
+            return
+        }
+        val elapsed = (now - pendingRlAt).coerceIn(30L, 240L).toFloat()
+        qLearningEpisode.add(QTransition(state, pendingRlAction, 8f + 0.08f * (elapsed / 80f), null))
+        pendingRlState = null
+        pendingRlAt = 0L
+        updateQLearningEpisode("PIPE_NO_GAP")
+        qLearningEpisode.clear()
     }
 
     private fun handleAutoControl(
@@ -565,6 +697,9 @@ class GameAccessibilityService : AccessibilityService() {
             screenStatus = d.message
             return
         }
+
+        val pipePassed = if (d.obstacleX >= 0 && d.pipeBounds != "NONE")
+            trackPipePass(d, fieldWidth, now) else false
 
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
@@ -616,7 +751,8 @@ class GameAccessibilityService : AccessibilityService() {
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
-            appendRunLog("FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX + " gap=UNKNOWN dt=" + dt.toInt() + "ms decision=WAIT_GAP")
+            appendRunLog("FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX + " gap=UNKNOWN dt=" + dt.toInt() + "ms pipePassed=" + pipePassed + " decision=WAIT_GAP")
+            if (pipePassed) rewardPipePassWithoutGap(now)
             // Allow one launch-stabilization flap only; repeated blind flaps caused the previous overshoot.
             val launchHorizon = 120f
             val projectedLaunchY = d.birdY + velocity * launchHorizon + 0.5f * gravity * launchHorizon * launchHorizon
@@ -649,7 +785,6 @@ class GameAccessibilityService : AccessibilityService() {
             ?.let { ((it[1].toIntOrNull() ?: 0) - (it[0].toIntOrNull() ?: 0)).coerceAtLeast(0) / 2f }
             ?.takeIf { it > 0f } ?: fieldWidth * 0.018f
         val distance = (d.obstacleX - d.birdX - birdHalfWidth - fieldWidth * 0.006f).toFloat()
-        val pipePassed = trackPipePass(d, fieldWidth)
 
         val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
         val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt in 35f..500f)
@@ -658,7 +793,7 @@ class GameAccessibilityService : AccessibilityService() {
             smoothedObstacleSpeed = if (smoothedObstacleSpeed > 0f)
                 smoothedObstacleSpeed * 0.55f + measuredSpeed * 0.45f else measuredSpeed
         }
-        val fallbackSpeed = fieldWidth * 0.00135f
+        val fallbackSpeed = fieldWidth * 0.00075f
         val obstacleSpeed = if (smoothedObstacleSpeed > 0f) smoothedObstacleSpeed else fallbackSpeed
         previousObstacleX = d.obstacleX
         previousObstacleAt = now
@@ -697,7 +832,14 @@ class GameAccessibilityService : AccessibilityService() {
         val predictedTooLow = noTapPrediction > safeBottom - earlyCorrectionBand
         val tapImprovesPath = afterTapMissDistance < noTapMissDistance - max(8f, safeMargin * 0.10f)
         val tapDoesNotOvershootHigh = afterTapPrediction >= safeTop - fieldHeight * 0.008f
-        val tapSafe = safeWindowValid && tapImprovesPath && tapDoesNotOvershootHigh
+        // Permit staged recovery taps only when one flap makes a substantial correction and
+        // leaves the predicted point within a bounded distance of the lower safe edge.
+        val maxPostTapResidual = max(gapHeight * 0.38f, fieldHeight * 0.035f)
+        val tapProgressesEnough = afterTapMissDistance <= noTapMissDistance * 0.72f
+        val tapResidualAcceptable = afterTapPrediction <= safeBottom ||
+            afterTapPrediction - safeBottom <= maxPostTapResidual
+        val tapSafe = safeWindowValid && tapImprovesPath && tapDoesNotOvershootHigh &&
+            tapProgressesEnough && tapResidualAcceptable
         val fallbackAction = if (distanceWindow && timeToPipe > reactionMs && predictedTooLow && tapSafe) RL_FLAP else RL_WAIT
         val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
         val qCanFlapWithoutRisk = noTapPrediction >= safeTop && noTapPrediction <= safeBottom &&
@@ -719,6 +861,7 @@ class GameAccessibilityService : AccessibilityService() {
             noTapPrediction < safeTop -> "TOO_HIGH_WAIT"
             shouldTap && fallbackAction == RL_FLAP -> "SAFETY_TAP"
             shouldTap -> "QLEARNING_TAP"
+            predictedTooLow && !tapResidualAcceptable -> "TAP_RESIDUAL_TOO_LARGE"
             predictedTooLow && !tapSafe -> "TAP_NOT_SAFE"
             qAction == RL_FLAP && !qCanFlapWithoutRisk -> "QLEARNING_SHIELDED"
             else -> "WAIT"
@@ -727,9 +870,10 @@ class GameAccessibilityService : AccessibilityService() {
             "FRAME bird=" + d.birdY + " box=" + d.birdBounds + " v=" + fmt(velocity) + " raw=" + fmt(rawVelocity) + " g=" + fmt(gravity) +
                 " pipeX=" + d.obstacleX + " pipeBox=" + d.pipeBounds + " runs=" + d.pipeRuns + " gap=" + gapTop.toInt() + ".." + gapBottom.toInt() +
                 " dist=" + distance.toInt() + " speed=" + fmt(obstacleSpeed) + " t=" + timeToPipe.toInt() + " noTap=" + noTapPrediction.toInt() +
-                " afterTap=" + afterTapPrediction.toInt() + " safe=" + safeTop.toInt() + ".." + safeBottom.toInt() + " flapV=" + fmt(estimatedFlapVelocity) +
+                " afterTap=" + afterTapPrediction.toInt() + " miss=" + noTapMissDistance.toInt() + "/" + afterTapMissDistance.toInt() +
+                " residualLimit=" + maxPostTapResidual.toInt() + " safe=" + safeTop.toInt() + ".." + safeBottom.toInt() + " flapV=" + fmt(estimatedFlapVelocity) +
                 " state=" + stateKey + " q=" + fmt(qFlap) + "/" + fmt(qWait) + " visits=" + qFlapVisits + "/" + qWaitVisits +
-                " pipePassed=" + pipePassed + " decision=" + decisionReason
+                " tableRev=" + qLearningRevision + " pipePassed=" + pipePassed + " decision=" + decisionReason
         )
         var actualAction = RL_WAIT
         if (shouldTap) {
@@ -765,6 +909,10 @@ class GameAccessibilityService : AccessibilityService() {
         runStartedAt = SystemClock.elapsedRealtime()
         attemptCount = 0
         appendRunLog("=== СЕССИЯ МОНИТОРИНГА ===")
+        appendRunLog("RL_TABLE_SESSION status=" + qLearningMetaStatus + " revision=" +
+            qLearningRevision + " states=" + qLearningTable.size + " updatedAt=" +
+            qLearningUpdatedAt + " checksum=" + qLearningChecksum +
+            " totalPipes=" + qLearningTotalPipePasses + " totalEpisodes=" + qLearningTotalEpisodes)
         wasActiveGame = false
         lastCaptureStartedAt = 0L
         nextScreenshotAllowedAt = 0L
@@ -887,6 +1035,9 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastTapStatus = "TAP —"
         @Volatile var learnedStateCount = 0
         @Volatile var learnedPipeCount = 0
+        @Volatile var learnedRevision = 0L
+        @Volatile var learnedUpdatedAt = 0L
+        @Volatile var learnedChecksum = "EMPTY"
         const val RL_FLAP = 0
         const val RL_WAIT = 1
         @Volatile private var instance: GameAccessibilityService? = null
