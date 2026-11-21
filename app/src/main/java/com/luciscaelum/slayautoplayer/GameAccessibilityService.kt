@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Bitmap
 import android.graphics.Path
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import android.hardware.HardwareBuffer
@@ -47,7 +48,11 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousVerticalVelocity = 0f
     private var previousRawVerticalVelocity = 0f
     private var estimatedFlapVelocity = -0.55f
+    private var flapCalibrationLoaded = false
     private var estimatedGravity = 0.0018f
+    // Planned impulse time is a predicted in-game response time, not a blind tap timer.
+    private var pendingPipeTapAt = 0L
+    private var pendingPipeTapTrackId = -1
     private data class PendingTapObservation(
         val id: Long,
         val source: String,
@@ -133,8 +138,33 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        ensureFlapCalibrationLoaded()
         ensureQLearningLoaded()
         screenStatus = "Служба подключена"
+    }
+
+    private fun ensureFlapCalibrationLoaded() {
+        if (flapCalibrationLoaded) return
+        flapCalibrationLoaded = true
+        val stored = getSharedPreferences("bird_play_learning", MODE_PRIVATE)
+            .getFloat("estimated_flap_velocity", Float.NaN)
+        if (stored.isFinite() && stored in -3.0f..-0.08f) {
+            estimatedFlapVelocity = stored
+            appendRunLog("FLAP_CALIBRATION_LOAD status=RESTORED value=${fmt(estimatedFlapVelocity)}")
+        } else {
+            appendRunLog("FLAP_CALIBRATION_LOAD status=DEFAULT value=${fmt(estimatedFlapVelocity)}")
+        }
+    }
+
+    private fun persistFlapCalibration(source: String) {
+        if (!estimatedFlapVelocity.isFinite() || estimatedFlapVelocity !in -3.0f..-0.08f) return
+        val saved = getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
+            .putFloat("estimated_flap_velocity", estimatedFlapVelocity)
+            .commit()
+        appendRunLog(
+            "FLAP_CALIBRATION_SAVE source=$source value=${fmt(estimatedFlapVelocity)} " +
+                "status=${if (saved) "OK" else "FAILED"}"
+        )
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -267,7 +297,7 @@ class GameAccessibilityService : AccessibilityService() {
             smoothedObstacleSpeed = 0f
             previousVerticalVelocity = 0f
             previousRawVerticalVelocity = 0f
-            estimatedFlapVelocity = -0.55f
+            ensureFlapCalibrationLoaded()
             estimatedGravity = 0.0018f
             synchronized(tapObservationLock) { pendingTapObservation = null }
             autoTapCount = 0
@@ -768,6 +798,8 @@ class GameAccessibilityService : AccessibilityService() {
         earlyLaunchTapUsed = false
         hasSeenPipeThisAttempt = false
         lastTrackedPipeRightX = -1
+        pendingPipeTapAt = 0L
+        pendingPipeTapTrackId = -1
     }
 
     private fun encodeQLearningState(velocity: Float, timeToPipe: Float, targetOffset: Float, gapHeight: Float, fieldHeight: Int): String {
@@ -984,6 +1016,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (confirmed) {
             estimatedFlapVelocity = (estimatedFlapVelocity * 0.35f + observed * 0.65f)
                 .coerceIn(-3.0f, -0.08f)
+            persistFlapCalibration("AUTO_TAP")
         }
         appendRunLog(
             "PHYSICS_RESPONSE tapId=${pending.id} source=${pending.source} " +
@@ -1033,6 +1066,11 @@ class GameAccessibilityService : AccessibilityService() {
 
         if (d.obstacleX >= 0 && d.pipeBounds != "NONE") hasSeenPipeThisAttempt = true
         val pipePassed = trackPipePass(d, fieldWidth, now)
+        if (pipePassed && pendingPipeTapAt > 0L) {
+            appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PIPE_PASSED trackId=$pendingPipeTapTrackId")
+            pendingPipeTapAt = 0L
+            pendingPipeTapTrackId = -1
+        }
 
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
         val rawVelocity = if (previousBirdY >= 0 && dt > 0f)
@@ -1062,6 +1100,7 @@ class GameAccessibilityService : AccessibilityService() {
             val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-3.0f, -0.08f)
             estimatedFlapVelocity = (estimatedFlapVelocity * 0.35f + manualFlapVelocity * 0.65f)
                 .coerceIn(-3.0f, -0.08f)
+            persistFlapCalibration("MANUAL_TAP")
             manualTapCount++
             attemptManualTaps++
             if (pendingRlState != null) pendingRlAction = RL_FLAP
@@ -1086,6 +1125,13 @@ class GameAccessibilityService : AccessibilityService() {
         val tapY = ((cropTop + (screenHeight - cropTop) * 0.52f) * sy).coerceIn(1f, resources.displayMetrics.heightPixels - 1f)
 
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
+        if (pendingPipeTapAt > 0L && pendingPipeTapTrackId != activePipeTrackId) {
+            appendRunLog(
+                "PIPE_TAP_PLAN_CANCEL reason=TRACK_CHANGED oldTrack=$pendingPipeTapTrackId newTrack=$activePipeTrackId"
+            )
+            pendingPipeTapAt = 0L
+            pendingPipeTapTrackId = -1
+        }
         if (!hasGap) {
             appendRunLog(
                 "FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX +
@@ -1103,14 +1149,13 @@ class GameAccessibilityService : AccessibilityService() {
                 attemptLastAction = "WAIT"
                 appendRunLog("ACTION_SPACE selected=WAIT reason=PIPE_GAP_UNCONFIRMED")
             } else if (!hasSeenPipeThisAttempt) {
-                // Stabilize the bird before the first obstacle is visible. Waiting for a pipe
-                // leaves too little time to recover when the bird is already falling.
-                // Use a broad central corridor and a short one-flap forecast; after each tap,
-                // wait for measured physics feedback and decide again from the next frame.
-                val prepipeHorizon = 260f
+                // Before the first pipe, intervene only near the lower field boundary.
+                // The pipe planner should own positioning; this guard prevents an otherwise
+                // unavoidable fall without repeatedly pulling the bird toward screen centre.
+                val prepipeHorizon = 220f
                 val prepipeTapAt = 65f
-                val prepipeUpper = fieldHeight * 0.42f
-                val prepipeLower = fieldHeight * 0.60f
+                val prepipeUpper = fieldHeight * 0.16f
+                val prepipeLower = fieldHeight * 0.78f
                 val predictedWithoutTap = predictTrajectoryAtPipe(
                     d.birdY.toFloat(), velocity, gravity, prepipeHorizon, floatArrayOf()
                 )
@@ -1118,38 +1163,39 @@ class GameAccessibilityService : AccessibilityService() {
                     d.birdY.toFloat(), velocity, gravity, prepipeHorizon, floatArrayOf(prepipeTapAt)
                 )
                 val prepipeTapSpacingReady = lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L
-                val prepipeNeedsLift = predictedWithoutTap > prepipeLower && velocity > -0.10f
-                val prepipeTapKeepsCentral = predictedWithTap in prepipeUpper..prepipeLower
-                val prepipeTapImproves = predictedWithoutTap - predictedWithTap >= max(18f, fieldHeight * 0.012f)
+                val prepipeNeedsEmergencyLift = predictedWithoutTap > prepipeLower &&
+                    velocity > 0.45f
+                val prepipeTapKeepsInField = predictedWithTap in prepipeUpper..(prepipeLower + fieldHeight * 0.035f)
+                val prepipeTapImproves = predictedWithoutTap - predictedWithTap >= max(22f, fieldHeight * 0.018f)
                 val prepipeCanTap = !tapFeedbackPending && !gestureInFlight.get() && prepipeTapSpacingReady
-                val shouldPrepipeTap = prepipeCanTap && prepipeNeedsLift &&
-                    prepipeTapKeepsCentral && prepipeTapImproves
+                val shouldPrepipeTap = prepipeCanTap && prepipeNeedsEmergencyLift &&
+                    prepipeTapKeepsInField && prepipeTapImproves
 
                 val prepipeReason = when {
                     tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
                     gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
                     !prepipeTapSpacingReady -> "INTERTAP_SPACING"
-                    !prepipeNeedsLift -> "PREDICTED_PATH_IN_CORRIDOR_OR_RISING"
-                    !prepipeTapKeepsCentral -> "FLAP_WOULD_OVERSHOOT_OR_TOO_LATE"
+                    !prepipeNeedsEmergencyLift -> "NO_EMERGENCY_FALL"
+                    !prepipeTapKeepsInField -> "FLAP_WOULD_OVERSHOOT"
                     !prepipeTapImproves -> "FLAP_NOT_USEFUL"
-                    else -> "PREPIPE_STABILIZATION"
+                    else -> "EMERGENCY_GUARD"
                 }
 
-                if (shouldPrepipeTap && tap(tapX, tapY, "PREPIPE", velocity, d.birdY)) {
+                if (shouldPrepipeTap && tap(tapX, tapY, "PREPIPE_GUARD", velocity, d.birdY)) {
                     lastAutoTapAt = now
                     autoTapCount++
                     attemptAutoTaps++
                     attemptFlapDecisions++
-                    attemptLastAction = "FLAP_PREPIPE"
-                    attemptLastDecision = "PREPIPE_FLAP"
+                    attemptLastAction = "FLAP_PREPIPE_GUARD"
+                    attemptLastDecision = "PREPIPE_EMERGENCY_FLAP"
                     appendRunLog(
                         "PREPIPE_CONTROL y=${d.birdY} v=${fmt(velocity)} " +
                             "wait${prepipeHorizon.toInt()}=${predictedWithoutTap.toInt()} " +
                             "flap${prepipeHorizon.toInt()}=${predictedWithTap.toInt()} " +
-                            "band=${prepipeUpper.toInt()}..${prepipeLower.toInt()} selected=FLAP"
+                            "emergencyBand=${prepipeUpper.toInt()}..${prepipeLower.toInt()} selected=FLAP"
                     )
-                    appendRunLog("ACTION_SPACE selected=FLAP reason=PREPIPE_STABILIZATION")
-                    screenStatus = "СТАБИЛИЗАЦИЯ ДО ПЕРВОЙ ТРУБЫ • y=${d.birdY}"
+                    appendRunLog("ACTION_SPACE selected=FLAP reason=PREPIPE_EMERGENCY_GUARD")
+                    screenStatus = "ЗАЩИТА ДО ПЕРВОЙ ТРУБЫ • y=${d.birdY}"
                 } else {
                     attemptWaitDecisions++
                     attemptLastDecision = if (shouldPrepipeTap) "PREPIPE_TAP_REJECTED" else "PREPIPE_WAIT"
@@ -1158,11 +1204,11 @@ class GameAccessibilityService : AccessibilityService() {
                         "PREPIPE_CONTROL y=${d.birdY} v=${fmt(velocity)} " +
                             "wait${prepipeHorizon.toInt()}=${predictedWithoutTap.toInt()} " +
                             "flap${prepipeHorizon.toInt()}=${predictedWithTap.toInt()} " +
-                            "band=${prepipeUpper.toInt()}..${prepipeLower.toInt()} " +
+                            "emergencyBand=${prepipeUpper.toInt()}..${prepipeLower.toInt()} " +
                             "selected=WAIT reason=${if (shouldPrepipeTap) "TAP_REJECTED" else prepipeReason}"
                     )
                     appendRunLog("ACTION_SPACE selected=WAIT reason=${if (shouldPrepipeTap) "TAP_REJECTED" else prepipeReason}")
-                    screenStatus = "СТАБИЛИЗАЦИЯ ДО ПЕРВОЙ ТРУБЫ • прогноз=${predictedWithoutTap.toInt()}"
+                    screenStatus = "ДО ПЕРВОЙ ТРУБЫ • аварийный прогноз=${predictedWithoutTap.toInt()}"
                 }
             } else {
                 // Between pipes, WAIT is an explicit ballistic action; FLAP is evaluated
@@ -1296,10 +1342,15 @@ class GameAccessibilityService : AccessibilityService() {
         val interTapIntervals = floatArrayOf(160f, 240f, 320f, 400f)
         val elapsedSinceLastImpulse = if (lastAutoTapAt > 0L)
             (now - lastAutoTapAt).toFloat() - reactionMs else Float.POSITIVE_INFINITY
-        val firstTapDelays = if (lastAutoTapAt > 0L) {
+        val pendingResponseDelay = if (pendingPipeTapAt > 0L &&
+            pendingPipeTapTrackId == activePipeTrackId) {
+            (pendingPipeTapAt - now).toFloat().coerceAtLeast(reactionMs)
+        } else null
+        val initialTapChoices = if (lastAutoTapAt > 0L) {
             interTapIntervals.map { (it - elapsedSinceLastImpulse).coerceAtLeast(reactionMs) }
-                .distinct().sorted().toFloatArray()
-        } else floatArrayOf(reactionMs)
+        } else listOf(65f, 160f, 220f, 280f, 340f)
+        val firstTapDelays = (initialTapChoices + listOfNotNull(pendingResponseDelay))
+            .distinct().sorted().toFloatArray()
         var schedulesEvaluated = 0
 
         fun evaluateSchedule(schedule: List<Float>) {
@@ -1312,7 +1363,14 @@ class GameAccessibilityService : AccessibilityService() {
             val misses = floatArrayOf(missDistance(entryY), missDistance(middleY), missDistance(exitY))
             val worstMiss = misses.maxOrNull() ?: 0f
             val meanMiss = misses.average().toFloat()
-            val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f
+            val pendingScheduleMatch = pendingResponseDelay != null &&
+                abs(schedule.first() - pendingResponseDelay) <= 12f
+            // When safety is otherwise equal, postpone a flap instead of applying it too early.
+            // If a response-time was already scheduled for this pipe, preserve that exact plan.
+            val delayPreference = min(schedule.first(), 340f) * 0.025f
+            val pendingPlanBonus = if (pendingScheduleMatch) 10000f else 0f
+            val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f -
+                delayPreference - pendingPlanBonus
             val candidate = TapPlan(taps, entryY, middleY, exitY, worstMiss, meanMiss, score)
             allTapPlans.add(candidate)
             schedulesEvaluated++
@@ -1404,9 +1462,26 @@ class GameAccessibilityService : AccessibilityService() {
         val planFullySafe = bestSafePlan != null
         val gapTrusted = d.pipeConfidence >= 0.55f ||
             (timeToPipe <= 250f && d.pipeConfidence >= 0.42f)
+        val planningConditionsValid = distanceWindow && safeWindowValid && gapTrusted &&
+            !tapFeedbackPending && waitActionMiss > safetyMissThreshold && recoveryPossible
+        val pendingPlanMatchesSelection = pendingResponseDelay != null &&
+            abs(firstTapDelay - pendingResponseDelay) <= 12f
+        if (!planningConditionsValid && pendingPipeTapAt > 0L) {
+            appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PLAN_NO_LONGER_VALID trackId=$pendingPipeTapTrackId")
+            pendingPipeTapAt = 0L
+            pendingPipeTapTrackId = -1
+        } else if (planningConditionsValid && firstTapDelay > reactionMs + 20f &&
+            !pendingPlanMatchesSelection) {
+            pendingPipeTapAt = now + firstTapDelay.toLong()
+            pendingPipeTapTrackId = activePipeTrackId
+            appendRunLog(
+                "PIPE_TAP_PLAN_SCHEDULED trackId=$activePipeTrackId " +
+                    "responseIn=${firstTapDelay.toInt()}ms dispatchIn=${(firstTapDelay - reactionMs).toInt()}ms " +
+                    "planN=$bestPlanCount miss=${bestPlanMiss.toInt()}"
+            )
+        }
         val tapWindowReady = firstTapDelay <= reactionMs + 20f
-        val shouldTap = distanceWindow && safeWindowValid && gapTrusted && !tapFeedbackPending &&
-            tapWindowReady && waitActionMiss > safetyMissThreshold && recoveryPossible
+        val shouldTap = planningConditionsValid && tapWindowReady
 
         val actionCandidatesText = "WAIT:${waitActionMiss.toInt()} " +
             "FLAP_SAFE:${bestSafePlan?.let { it.worstMiss.toInt() } ?: "NA"} " +
@@ -1431,7 +1506,7 @@ class GameAccessibilityService : AccessibilityService() {
             !gapTrusted -> "LOW_GAP_CONFIDENCE_WAIT"
             tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
             waitActionMiss <= safetyMissThreshold -> "PATH_SAFE_WAIT"
-            recoveryPossible && !tapWindowReady -> "WAIT_INTERTAP_INTERVAL"
+            recoveryPossible && !tapWindowReady -> "WAIT_PLANNED_TAP_${firstTapDelay.toInt()}MS"
             planFullySafe && bestPlanCount >= 3 -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAPS"
             planFullySafe -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAP"
             bestRescuePlan != null && bestPlanCount >= 3 -> "RECOVERY_SAME_SIDE_PLAN_${bestPlanCount}_TAPS"
@@ -1453,7 +1528,9 @@ class GameAccessibilityService : AccessibilityService() {
                 " planSafety=${if (planFullySafe) "FULL" else if (bestRescuePlan != null) "SAME_SIDE_RESCUE" else "NONE"}" +
                 " safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)}" +
                 " candidates={$scenarioText} schedules=$schedulesEvaluated elapsedSinceImpulse=${if (lastAutoTapAt > 0L) elapsedSinceLastImpulse.toInt() else -1}ms" +
-                " nextImpulseDelay=${firstTapDelay.toInt()}ms intervalReady=$tapWindowReady feedbackPending=$tapFeedbackPending" +
+                " nextImpulseDelay=${firstTapDelay.toInt()}ms intervalReady=$tapWindowReady " +
+                "pendingTapIn=${if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L}ms " +
+                "feedbackPending=$tapFeedbackPending" +
                 " fallback=${if (fallbackAction == RL_FLAP) "FLAP" else "WAIT"}" +
                 " q=${fmt(qFlap)}/${fmt(qWait)} visits=$qFlapVisits/$qWaitVisits qAction=${if (qAction == RL_FLAP) "FLAP" else "WAIT"}" +
                 " recoveryPossible=$recoveryPossible predictedCollision=${zeroWorstMiss > 0f} " +
@@ -1466,12 +1543,17 @@ class GameAccessibilityService : AccessibilityService() {
             if (tap(tapX, tapY, "AUTO", velocity, d.birdY)) {
                 actualAction = RL_FLAP
                 lastAutoTapAt = now
+                val scheduledResponseIn = if (pendingPipeTapAt > 0L &&
+                    pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L
+                pendingPipeTapAt = 0L
+                pendingPipeTapTrackId = -1
                 autoTapCount++
                 attemptAutoTaps++
                 attemptLastAction = "FLAP_REQUESTED"
                 appendRunLog(
                     "ACTION auto_tap accepted id=$lastTapRequestId count=$autoTapCount " +
-                        "plan=$bestPlanCount firstDelay=${firstTapDelay.toInt()}ms intervals=$scheduleText"
+                        "plan=$bestPlanCount firstDelay=${firstTapDelay.toInt()}ms " +
+                        "scheduledResponseIn=${scheduledResponseIn}ms intervals=$scheduleText"
                 )
             } else {
                 attemptLastAction = "FLAP_REJECTED"
@@ -1487,6 +1569,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun startMonitoringInternal() {
+        ensureFlapCalibrationLoaded()
         ensureQLearningLoaded()
         if (instance == null) {
             screenStatus = "Включи службу специальных возможностей"
@@ -1525,7 +1608,7 @@ class GameAccessibilityService : AccessibilityService() {
         smoothedObstacleSpeed = 0f
         previousVerticalVelocity = 0f
         previousRawVerticalVelocity = 0f
-        estimatedFlapVelocity = -0.55f
+        ensureFlapCalibrationLoaded()
         estimatedGravity = 0.0018f
         gravitySamples.clear()
         resetQLearningAttempt()
