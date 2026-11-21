@@ -50,7 +50,7 @@ class GameAccessibilityService : AccessibilityService() {
         val requestedAt: Long,
         val baselineVelocity: Float,
         val baselineY: Int,
-        var completedAt: Long = 0L
+        @Volatile var completedAt: Long = 0L
     )
     private val tapObservationLock = Any()
     private var pendingTapObservation: PendingTapObservation? = null
@@ -849,9 +849,11 @@ class GameAccessibilityService : AccessibilityService() {
     private fun updateTapFeedback(
         now: Long, dt: Float, rawVelocity: Float, gravity: Float
     ): Pair<Boolean, Boolean> {
-        val pending = synchronized(tapObservationLock) { pendingTapObservation }
-            ?: return false to false
-        val completedAt = pending.completedAt
+        val snapshot = synchronized(tapObservationLock) {
+            pendingTapObservation?.let { it to it.completedAt }
+        } ?: return false to false
+        val pending = snapshot.first
+        val completedAt = snapshot.second
         // Ignore a frame overlapping the gesture. Measure a complete bird-motion interval
         // that starts after Android confirms completion.
         if (completedAt <= 0L || previousBirdAt < completedAt || now - completedAt < 45L) {
@@ -1042,7 +1044,9 @@ class GameAccessibilityService : AccessibilityService() {
         val zeroMeanMiss = zeroMisses.average().toFloat()
 
         val bestByTapCount = arrayOfNulls<TapPlan>(5)
-        val firstTapDelays = floatArrayOf(reactionMs, reactionMs + 40f, reactionMs + 80f, reactionMs + 120f)
+        // The first impulse is modeled at the gesture's measured ~65 ms completion latency.
+        // Later taps are explored across several intervals because their cumulative lift differs.
+        val firstTapDelays = floatArrayOf(reactionMs)
         val interTapIntervals = floatArrayOf(150f, 190f, 230f, 270f, 310f, 350f, 390f)
         var schedulesEvaluated = 0
 
