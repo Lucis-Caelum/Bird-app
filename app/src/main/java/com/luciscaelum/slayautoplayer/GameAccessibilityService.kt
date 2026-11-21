@@ -60,6 +60,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var lastTrackedPipeX = -1
     private var trackedPipeNearBird = false
     private var qLearningPipePasses = 0
+    private var earlyLaunchTapUsed = false
     private val gravitySamples = ArrayDeque<Float>()
     private var lastCaptureStartedAt = 0L
     private var wasActiveGame = false
@@ -461,6 +462,7 @@ class GameAccessibilityService : AccessibilityService() {
         lastTrackedPipeX = -1
         trackedPipeNearBird = false
         qLearningPipePasses = 0
+        earlyLaunchTapUsed = false
     }
 
     private fun encodeQLearningState(velocity: Float, timeToPipe: Float, targetOffset: Float, gapHeight: Float, fieldHeight: Int): String {
@@ -535,7 +537,8 @@ class GameAccessibilityService : AccessibilityService() {
         return passed
     }
 
-    private fun handleAutoControl(        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
+    private fun handleAutoControl(
+        d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
     ) {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
@@ -607,9 +610,25 @@ class GameAccessibilityService : AccessibilityService() {
         val hasGap = d.obstacleX > d.birdX && d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (!hasGap) {
             appendRunLog("FRAME bird=" + d.birdY + " v=" + fmt(velocity) + " pipe=" + d.obstacleX + " gap=UNKNOWN dt=" + dt.toInt() + "ms decision=WAIT_GAP")
-            // No geometry means no flap. The prior fixed-height recovery taps caused the logged overshoot.
-            screenStatus = if (d.obstacleX >= 0) "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
-                else "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
+            // Allow one launch-stabilization flap only; repeated blind flaps caused the previous overshoot.
+            val launchHorizon = 120f
+            val projectedLaunchY = d.birdY + velocity * launchHorizon + 0.5f * gravity * launchHorizon * launchHorizon
+            val launchGuardY = fieldHeight * 0.68f
+            if (!earlyLaunchTapUsed && projectedLaunchY > launchGuardY && velocity > 0.08f) {
+                if (tap(tapX, tapY)) {
+                    earlyLaunchTapUsed = true
+                    lastAutoTapAt = now
+                    tapObservationPendingAt = now
+                    autoTapCount++
+                    appendRunLog("ACTION single_launch_tap accepted y=" + d.birdY + " projected=" + projectedLaunchY.toInt())
+                    screenStatus = "ПЕРВЫЙ ПОДЪЁМ • одна стартовая коррекция"
+                } else {
+                    appendRunLog("ACTION single_launch_tap busy_or_rejected")
+                }
+            } else {
+                screenStatus = if (d.obstacleX >= 0) "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
+                    else "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
+            }
             previousObstacleX = -1
             previousObstacleAt = 0L
             return
