@@ -1462,6 +1462,7 @@ class GameAccessibilityService : AccessibilityService() {
         val planFullySafe = bestSafePlan != null
         val gapTrusted = d.pipeConfidence >= 0.55f ||
             (timeToPipe <= 250f && d.pipeConfidence >= 0.42f)
+        val tapDispatchWindow = reactionMs + 45f
         val planningConditionsValid = distanceWindow && safeWindowValid && gapTrusted &&
             !tapFeedbackPending && waitActionMiss > safetyMissThreshold && recoveryPossible
         val pendingPlanMatchesSelection = pendingResponseDelay != null &&
@@ -1470,7 +1471,7 @@ class GameAccessibilityService : AccessibilityService() {
             appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PLAN_NO_LONGER_VALID trackId=$pendingPipeTapTrackId")
             pendingPipeTapAt = 0L
             pendingPipeTapTrackId = -1
-        } else if (planningConditionsValid && firstTapDelay > reactionMs + 20f &&
+        } else if (planningConditionsValid && firstTapDelay > tapDispatchWindow &&
             !pendingPlanMatchesSelection) {
             pendingPipeTapAt = now + firstTapDelay.toLong()
             pendingPipeTapTrackId = activePipeTrackId
@@ -1480,7 +1481,7 @@ class GameAccessibilityService : AccessibilityService() {
                     "planN=$bestPlanCount miss=${bestPlanMiss.toInt()}"
             )
         }
-        val tapWindowReady = firstTapDelay <= reactionMs + 20f
+        val tapWindowReady = firstTapDelay <= tapDispatchWindow
         val shouldTap = planningConditionsValid && tapWindowReady
 
         val actionCandidatesText = "WAIT:${waitActionMiss.toInt()} " +
@@ -1586,6 +1587,7 @@ class GameAccessibilityService : AccessibilityService() {
             qLearningRevision + " states=" + qLearningTable.size + " updatedAt=" +
             qLearningUpdatedAt + " checksum=" + qLearningChecksum +
             " totalPipes=" + qLearningTotalPipePasses + " totalEpisodes=" + qLearningTotalEpisodes)
+        appendRunLog("FLAP_CALIBRATION_SESSION value=" + fmt(estimatedFlapVelocity) + " loaded=" + flapCalibrationLoaded)
         wasActiveGame = false
         lastCaptureStartedAt = 0L
         nextScreenshotAllowedAt = 0L
