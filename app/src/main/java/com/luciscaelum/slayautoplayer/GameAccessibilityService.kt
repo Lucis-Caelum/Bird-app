@@ -49,7 +49,7 @@ class GameAccessibilityService : AccessibilityService() {
     private val runLog = ArrayDeque<String>()
     private var runStartedAt = 0L
     private var attemptCount = 0
-    private data class QEntry(val values: FloatArray = FloatArray(2), val visits: IntArray = IntArray(2))
+    private data class QEntry(val values: FloatArray = FloatArray(2), val visits: IntArray = IntArray(2), var safeExploreTried: Boolean = false)
     private data class QTransition(val state: String, val action: Int, val reward: Float, val nextState: String?)
     private val qLearningTable = LinkedHashMap<String, QEntry>()
     private val qLearningEpisode = ArrayList<QTransition>(512)
@@ -430,7 +430,8 @@ class GameAccessibilityService : AccessibilityService() {
                 if (row.length() < 4) continue
                 qLearningTable[key] = QEntry(
                     floatArrayOf(row.optDouble(0, 0.0).toFloat(), row.optDouble(1, 0.0).toFloat()),
-                    intArrayOf(row.optInt(2, 0), row.optInt(3, 0))
+                    intArrayOf(row.optInt(2, 0), row.optInt(3, 0)),
+                    row.optInt(4, 0) != 0
                 )
             }
             learnedStateCount = qLearningTable.size
@@ -448,7 +449,7 @@ class GameAccessibilityService : AccessibilityService() {
             val json = JSONObject()
             for ((state, entry) in qLearningTable) {
                 val row = JSONArray().put(entry.values[0].toDouble()).put(entry.values[1].toDouble())
-                    .put(entry.visits[0]).put(entry.visits[1])
+                    .put(entry.visits[0]).put(entry.visits[1]).put(if (entry.safeExploreTried) 1 else 0)
                 json.put(state, row)
             }
             getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit().putString("q_table", json.toString()).apply()
@@ -473,8 +474,14 @@ class GameAccessibilityService : AccessibilityService() {
         return velocityBin.toString() + ":" + timeBin.toString() + ":" + verticalBin.toString()
     }
 
-    private fun qLearningChoice(state: String, fallback: Int): Int {
-        val entry = qLearningTable[state] ?: return fallback
+    private fun qLearningChoice(state: String, fallback: Int, allowSafeExploration: Boolean): Int {
+        val entry = qLearningTable[state] ?: if (allowSafeExploration) qLearningTable.getOrPut(state) { QEntry() } else return fallback
+        // The first FLAP sample is explored once per quantized state, and only when both
+        // the no-tap and post-flap trajectories fit fully inside the safe gap.
+        if (allowSafeExploration && entry.visits[RL_WAIT] >= 2 && entry.visits[RL_FLAP] == 0 && !entry.safeExploreTried) {
+            entry.safeExploreTried = true
+            return RL_FLAP
+        }
         if (entry.visits[RL_FLAP] < 2 || entry.visits[RL_WAIT] < 2) return fallback
         val difference = entry.values[RL_FLAP] - entry.values[RL_WAIT]
         return when { difference > 0.20f -> RL_FLAP; difference < -0.20f -> RL_WAIT; else -> fallback }
@@ -693,14 +700,14 @@ class GameAccessibilityService : AccessibilityService() {
         val tapSafe = safeWindowValid && tapImprovesPath && tapDoesNotOvershootHigh
         val fallbackAction = if (distanceWindow && timeToPipe > reactionMs && predictedTooLow && tapSafe) RL_FLAP else RL_WAIT
         val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
-        val qAction = qLearningChoice(stateKey, fallbackAction)
+        val qCanFlapWithoutRisk = noTapPrediction >= safeTop && noTapPrediction <= safeBottom &&
+            afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
+        val qAction = qLearningChoice(stateKey, fallbackAction, qCanFlapWithoutRisk)
         val qEntry = qLearningTable[stateKey]
         val qFlap = qEntry?.values?.get(RL_FLAP) ?: 0f
         val qWait = qEntry?.values?.get(RL_WAIT) ?: 0f
         val qFlapVisits = qEntry?.visits?.get(RL_FLAP) ?: 0
         val qWaitVisits = qEntry?.visits?.get(RL_WAIT) ?: 0
-        val qCanFlapWithoutRisk = noTapPrediction >= safeTop && noTapPrediction <= safeBottom &&
-            afterTapPrediction >= safeTop && afterTapPrediction <= safeBottom
         // Physics shield is authoritative; Q-Learning can refine safe choices but cannot force an unsafe flap.
         val shouldTap = distanceWindow && timeToPipe > reactionMs && safeWindowValid && noTapPrediction >= safeTop &&
             (fallbackAction == RL_FLAP || (qAction == RL_FLAP && tapSafe && qCanFlapWithoutRisk))
