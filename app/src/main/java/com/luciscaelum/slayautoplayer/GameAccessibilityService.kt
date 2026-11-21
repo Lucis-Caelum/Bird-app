@@ -768,8 +768,11 @@ class GameAccessibilityService : AccessibilityService() {
         // The detector deliberately drops a pipe only after its trailing edge clears the bird.
         // Confirm the pass on that disappearance instead of waiting for the next pipe to appear.
         if (currentX < 0 || d.pipeBounds == "NONE") {
+            // The previous image may be one capture interval behind the actual crossing.
+            // Once a recently tracked pipe disappears from the overlap zone, confirm the pass.
             val cleared = trackedPipeNearBird && lastTrackedPipeRightX >= 0 &&
-                lastTrackedPipeRightX < d.birdX - fieldWidth * 0.035f
+                staleAge in 0L..260L &&
+                lastTrackedPipeRightX < d.birdX + fieldWidth * 0.12f
             if (cleared) {
                 qLearningPipePasses++
                 qLearningTotalPipePasses++
