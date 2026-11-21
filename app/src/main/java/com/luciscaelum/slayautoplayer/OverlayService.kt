@@ -64,7 +64,7 @@ class OverlayService : Service() {
             setTextColor(0xFFFFFFFF.toInt())
             textSize = 9f
             maxWidth = dp(158)
-            maxLines = 6
+            maxLines = 7
             ellipsize = TextUtils.TruncateAt.END
             setPadding(dp(3), dp(2), dp(3), dp(4))
             contentDescription = "Удерживай верхнюю область, чтобы переместить панель"
@@ -175,8 +175,9 @@ class OverlayService : Service() {
         val pipe = "T ${GameAccessibilityService.lastObstacleX}"
         val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
         val tap = GameAccessibilityService.lastTapStatus
-        val counts = "A${GameAccessibilityService.autoTapCount} / H${GameAccessibilityService.manualTapCount} • Q${GameAccessibilityService.learnedStateCount}"
-        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts • $tap\nVOL− = STOP"
+        val counts = "A${GameAccessibilityService.autoTapCount} / H${GameAccessibilityService.manualTapCount} • $tap"
+        val learning = "Q${GameAccessibilityService.learnedStateCount} • rev ${GameAccessibilityService.learnedRevision} • P${GameAccessibilityService.learnedPipeCount}"
+        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts\nLEARN $learning\nVOL− = STOP"
     }
 
     override fun onDestroy() {
