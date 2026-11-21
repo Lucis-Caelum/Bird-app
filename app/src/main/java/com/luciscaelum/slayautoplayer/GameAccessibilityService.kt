@@ -482,7 +482,7 @@ class GameAccessibilityService : AccessibilityService() {
             entry.safeExploreTried = true
             return RL_FLAP
         }
-        if (entry.visits[RL_FLAP] < 2 || entry.visits[RL_WAIT] < 2) return fallback
+        if (entry.visits[RL_FLAP] < 1 || entry.visits[RL_WAIT] < 1) return fallback
         val difference = entry.values[RL_FLAP] - entry.values[RL_WAIT]
         return when { difference > 0.20f -> RL_FLAP; difference < -0.20f -> RL_WAIT; else -> fallback }
     }
@@ -710,7 +710,7 @@ class GameAccessibilityService : AccessibilityService() {
         val qWaitVisits = qEntry?.visits?.get(RL_WAIT) ?: 0
         // Physics shield is authoritative; Q-Learning can refine safe choices but cannot force an unsafe flap.
         val shouldTap = distanceWindow && timeToPipe > reactionMs && safeWindowValid && noTapPrediction >= safeTop &&
-            (fallbackAction == RL_FLAP || (qAction == RL_FLAP && tapSafe && qCanFlapWithoutRisk))
+            (fallbackAction == RL_FLAP || (qAction == RL_FLAP && qCanFlapWithoutRisk))
 
         val decisionReason = when {
             !distanceWindow -> "OUT_OF_RANGE"
