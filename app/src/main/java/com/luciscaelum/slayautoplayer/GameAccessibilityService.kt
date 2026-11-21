@@ -199,6 +199,7 @@ class GameAccessibilityService : AccessibilityService() {
                         lastBirdScaleMode = "UNKNOWN"
                         previousBirdAt = 0L
                         lastAutoTapAt = 0L
+                        seedBirdSizeBaseline(detection, "NEW_GAME_CAPTURE")
                         screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
                     } else if (!detection.activeGame && wasActiveGame) {
                         previousBirdY = -1
@@ -274,6 +275,7 @@ class GameAccessibilityService : AccessibilityService() {
             attemptCount++
             resetAttemptDiagnostics()
             appendRunLog("=== НАЧАЛО ПОПЫТКИ #$attemptCount ===")
+            seedBirdSizeBaseline(detection, "NEW_GAME_FRAME")
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             appendRunLog("=== КОНЕЦ ПОПЫТКИ #$attemptCount ===")
@@ -304,6 +306,26 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String,val birdBounds:String="NONE",val pipeBounds:String="NONE",val pipeRuns:String="NONE",val pipeConfidence:Float=0f,val birdScale:String="UNKNOWN")
+
+    private fun seedBirdSizeBaseline(d: Detection, source: String) {
+        if (d.birdBounds == "NONE") {
+            appendRunLog("BIRD_SCALE_BASELINE source=$source status=WAITING_FOR_BOUNDS")
+            return
+        }
+        val parts = d.birdBounds.split(",")
+        val x = parts.getOrNull(0)?.split("..")
+        val y = parts.getOrNull(1)?.split("..")
+        val width = if (x?.size == 2) (x[1].toIntOrNull() ?: 0) - (x[0].toIntOrNull() ?: 0) else 0
+        val height = if (y?.size == 2) (y[1].toIntOrNull() ?: 0) - (y[0].toIntOrNull() ?: 0) else 0
+        if (width > 0 && height > 0) {
+            baselineBirdWidth = width.toFloat()
+            baselineBirdHeight = height.toFloat()
+            lastBirdScaleMode = "NORMAL"
+            appendRunLog("BIRD_SCALE_BASELINE source=$source size=${width}x$height status=SEEDED")
+        } else {
+            appendRunLog("BIRD_SCALE_BASELINE source=$source status=INVALID_BOUNDS value=${d.birdBounds}")
+        }
+    }
     private fun detectPlayfield(bitmap: Bitmap): Detection {
         val w = bitmap.width
         val h = bitmap.height
@@ -1072,36 +1094,29 @@ class GameAccessibilityService : AccessibilityService() {
             )
             if (pipePassed) rewardPipePassWithoutGap(now)
 
-            val pipeVisibleButUnconfirmed = d.obstacleX >= 0 && d.pipeBounds != "NONE"
-            if (!hasSeenPipeThisAttempt && !pipeVisibleButUnconfirmed) {
-                // The launch correction is allowed only before the first pipe is ever seen.
-                val launchHorizon = 120f
-                val projectedLaunchY = d.birdY + velocity * launchHorizon +
-                    0.5f * gravity * launchHorizon * launchHorizon
-                val launchGuardY = fieldHeight * 0.68f
-                if (!earlyLaunchTapUsed && projectedLaunchY > launchGuardY && velocity > 0.08f) {
-                    if (tap(tapX, tapY, "LAUNCH", velocity, d.birdY)) {
-                        earlyLaunchTapUsed = true
-                        lastAutoTapAt = now
-                        autoTapCount++
-                        attemptAutoTaps++
-                        attemptLastAction = "FLAP_LAUNCH"
-                        appendRunLog("ACTION single_launch_tap accepted id=$lastTapRequestId y=" + d.birdY +
-                            " projected=" + projectedLaunchY.toInt())
-                        screenStatus = "ПЕРВЫЙ ПОДЪЁМ • одна стартовая коррекция"
-                    } else {
-                        appendRunLog("ACTION single_launch_tap busy_or_rejected")
-                    }
-                } else {
-                    screenStatus = "ПТИЦА y=" + d.birdY + " • ожидаю первую трубу"
-                }
-            } else if (pipeVisibleButUnconfirmed) {
-                // A visible pipe with uncertain geometry is not a cruise-control opportunity.
-                screenStatus = "ТРУБА x=" + d.obstacleX + " • уточняю просвет"
-                appendRunLog("INTERPIPE_CONTROL action=WAIT reason=PIPE_GAP_UNCONFIRMED")
+            val pipeVisibleButUnconfirmed = d.obstacleX >= 0
+            if (pipeVisibleButUnconfirmed) {
+                // If a real obstacle is visible but its gap is uncertain, do not mistake it
+                // for the open interval between pipes and do not blindly flap.
+                screenStatus = "ТРУБА x=${d.obstacleX} • уточняю просвет"
+                attemptLastDecision = "WAIT_PIPE_GAP_UNCONFIRMED"
+                attemptLastAction = "WAIT"
+                appendRunLog("ACTION_SPACE selected=WAIT reason=PIPE_GAP_UNCONFIRMED")
+            } else if (!hasSeenPipeThisAttempt) {
+                // Before the first pipe appears, keep the natural ballistic trajectory.
+                // The first correction will be planned from an actual detected gap.
+                attemptLastDecision = "WAIT_FIRST_PIPE"
+                attemptLastAction = "WAIT"
+                attemptWaitDecisions++
+                appendRunLog(
+                    "ACTION_SPACE selected=WAIT reason=WAIT_FOR_FIRST_PIPE " +
+                        "y=${d.birdY} v=${fmt(velocity)} natural300=" +
+                        predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, 300f, floatArrayOf()).toInt()
+                )
+                screenStatus = "ОЖИДАЮ ПЕРВУЮ ТРУБУ • естественная траектория"
             } else {
-                // Between pipes, ignore all floating pickups and hold a broad central flight band.
-                // Re-plan after each measured flap response; never send a blind tap sequence.
+                // Between pipes, WAIT is an explicit ballistic action; FLAP is evaluated
+                // against it before execution. Pickups are deliberately ignored.
                 val cruiseHorizon = 300f
                 val predictedWithoutTap = predictTrajectoryAtPipe(
                     d.birdY.toFloat(), velocity, gravity, cruiseHorizon, floatArrayOf()
@@ -1127,18 +1142,19 @@ class GameAccessibilityService : AccessibilityService() {
                         attemptAutoTaps++
                         attemptFlapDecisions++
                         attemptLastAction = "FLAP_INTERPIPE"
+                        attemptLastDecision = "INTERPIPE_FLAP"
                         appendRunLog(
-                            "INTERPIPE_CONTROL action=FLAP y=${d.birdY} v=${fmt(velocity)} " +
-                                "wait300=${predictedWithoutTap.toInt()} tap300=${predictedWithTap.toInt()} " +
-                                "band=${cruiseUpper.toInt()}..${cruiseLower.toInt()}"
+                            "ACTION_SPACE wait300=${predictedWithoutTap.toInt()} " +
+                                "flap300=${predictedWithTap.toInt()} selected=FLAP reason=INTERPIPE_LIFT_NEEDED"
                         )
                     } else {
                         attemptLastAction = "FLAP_INTERPIPE_REJECTED"
-                        appendRunLog("INTERPIPE_CONTROL action=WAIT reason=TAP_REJECTED")
+                        appendRunLog("ACTION_SPACE selected=WAIT reason=TAP_REJECTED")
                     }
                 } else {
                     attemptWaitDecisions++
                     attemptLastAction = "WAIT_INTERPIPE"
+                    attemptLastDecision = "INTERPIPE_WAIT"
                     val reason = when {
                         tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
                         gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
@@ -1148,9 +1164,8 @@ class GameAccessibilityService : AccessibilityService() {
                         else -> "TAP_NOT_USEFUL"
                     }
                     appendRunLog(
-                        "INTERPIPE_CONTROL action=WAIT reason=$reason y=${d.birdY} v=${fmt(velocity)} " +
-                            "wait300=${predictedWithoutTap.toInt()} tap300=${predictedWithTap.toInt()} " +
-                            "band=${cruiseUpper.toInt()}..${cruiseLower.toInt()}"
+                        "ACTION_SPACE wait300=${predictedWithoutTap.toInt()} " +
+                            "flap300=${predictedWithTap.toInt()} selected=WAIT reason=$reason"
                     )
                     screenStatus = "МЕЖДУ ТРУБАМИ • y=${d.birdY} • прогноз=${predictedWithoutTap.toInt()}"
                 }
@@ -1222,8 +1237,12 @@ class GameAccessibilityService : AccessibilityService() {
         val zeroMeanMiss = zeroMisses.average().toFloat()
 
         val bestByTapCount = arrayOfNulls<TapPlan>(5)
-        // Android captures every ~80 ms and gesture completion/feedback must be observed before
-        // another tap. Use intervals aligned to that cadence so the selected spacing can be executed.
+        val allTapPlans = ArrayList<TapPlan>(64)
+        // WAIT is a first-class action: the zero-tap ballistic trajectory above is its
+        // full entry/middle/exit evaluation. FLAP candidates are compared against it.
+        val waitActionMiss = zeroWorstMiss
+        // Different intervals create different lifts; preserve all schedules rather than
+        // retaining only the mathematically best miss for each tap count.
         val interTapIntervals = floatArrayOf(160f, 240f, 320f, 400f)
         val elapsedSinceLastImpulse = if (lastAutoTapAt > 0L)
             (now - lastAutoTapAt).toFloat() - reactionMs else Float.POSITIVE_INFINITY
@@ -1235,7 +1254,6 @@ class GameAccessibilityService : AccessibilityService() {
 
         fun evaluateSchedule(schedule: List<Float>) {
             if (schedule.isEmpty() || schedule.size > 4) return
-            // Do not count taps scheduled after the pipe starts overlapping the bird.
             if (schedule.last() + 35f >= timeToPipe) return
             val taps = schedule.toFloatArray()
             val entryY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, timeToPipe, taps)
@@ -1244,14 +1262,13 @@ class GameAccessibilityService : AccessibilityService() {
             val misses = floatArrayOf(missDistance(entryY), missDistance(middleY), missDistance(exitY))
             val worstMiss = misses.maxOrNull() ?: 0f
             val meanMiss = misses.average().toFloat()
-            // Prefer fewer taps when the predicted path safety is similar.
             val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f
+            val candidate = TapPlan(taps, entryY, middleY, exitY, worstMiss, meanMiss, score)
+            allTapPlans.add(candidate)
             schedulesEvaluated++
             val count = schedule.size
             val previous = bestByTapCount[count]
-            if (previous == null || score < previous.score) {
-                bestByTapCount[count] = TapPlan(taps, entryY, middleY, exitY, worstMiss, meanMiss, score)
-            }
+            if (previous == null || score < previous.score) bestByTapCount[count] = candidate
         }
 
         fun expandSchedules(schedule: MutableList<Float>) {
@@ -1273,18 +1290,47 @@ class GameAccessibilityService : AccessibilityService() {
             }
         }
 
-        var bestPlan: TapPlan? = null
-        var bestPlanCount = 0
-        var bestPlanScore = zeroWorstMiss
-        for (count in 1..4) {
-            val candidate = bestByTapCount[count] ?: continue
-            if (candidate.score < bestPlanScore) {
-                bestPlan = candidate
-                bestPlanCount = count
-                bestPlanScore = candidate.score
+        val minUsefulImprovement = max(7f, safeMargin * 0.06f)
+        fun sameOrImprovedSide(candidateY: Float, naturalY: Float): Boolean {
+            val naturalSide = when {
+                naturalY < safeTop -> -1
+                naturalY > safeBottom -> 1
+                else -> 0
+            }
+            val candidateSide = when {
+                candidateY < safeTop -> -1
+                candidateY > safeBottom -> 1
+                else -> 0
+            }
+            return when (naturalSide) {
+                0 -> candidateSide == 0
+                -1 -> candidateSide != 1
+                else -> candidateSide != -1
             }
         }
-        val bestPlanMiss = bestPlan?.worstMiss ?: zeroWorstMiss
+        fun doesNotReverseIntoOppositeCollision(candidate: TapPlan): Boolean =
+            sameOrImprovedSide(candidate.entryY, zeroEntryY) &&
+                sameOrImprovedSide(candidate.middleY, zeroMiddleY) &&
+                sameOrImprovedSide(candidate.exitY, zeroExitY)
+
+        // Prefer a plan that keeps the entire horizontal overlap inside the safe window.
+        // If no fully-safe tap plan exists, permit a same-side rescue only when it improves
+        // the natural trajectory and never turns a low-side miss into a high-side collision.
+        val bestSafePlan = allTapPlans
+            .filter { it.worstMiss <= 0f }
+            .minByOrNull { it.score }
+        val bestRescuePlan = if (bestSafePlan == null) {
+            allTapPlans
+                .filter {
+                    it.worstMiss + minUsefulImprovement < waitActionMiss &&
+                        doesNotReverseIntoOppositeCollision(it)
+                }
+                .minByOrNull { it.score }
+        } else null
+        val bestPlan = bestSafePlan ?: bestRescuePlan
+        val bestPlanCount = bestPlan?.tapTimesMs?.size ?: 0
+        val bestPlanScore = bestPlan?.score ?: waitActionMiss
+        val bestPlanMiss = bestPlan?.worstMiss ?: waitActionMiss
         val bestPlanEntryY = bestPlan?.entryY ?: zeroEntryY
         val bestPlanMiddleY = bestPlan?.middleY ?: zeroMiddleY
         val bestPlanExitY = bestPlan?.exitY ?: zeroExitY
@@ -1299,18 +1345,18 @@ class GameAccessibilityService : AccessibilityService() {
             val p = bestByTapCount[count]
             if (p == null) "$count=NA" else "$count:${p.worstMiss.toInt()}@[${p.tapTimesMs.joinToString(",") { it.toInt().toString() }}]"
         }
-        val minUsefulImprovement = max(7f, safeMargin * 0.06f)
         val safetyMissThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
-        val recoveryPossible = bestPlan != null &&
-            bestPlanScore + minUsefulImprovement < zeroWorstMiss &&
-            bestPlanMiss < zeroWorstMiss * 0.94f
-        // Require credible gap geometry except in a close-range emergency.
+        val recoveryPossible = bestPlan != null
+        val planFullySafe = bestSafePlan != null
         val gapTrusted = d.pipeConfidence >= 0.55f ||
             (timeToPipe <= 250f && d.pipeConfidence >= 0.42f)
         val tapWindowReady = firstTapDelay <= reactionMs + 20f
         val shouldTap = distanceWindow && safeWindowValid && gapTrusted && !tapFeedbackPending &&
-            tapWindowReady && zeroWorstMiss > safetyMissThreshold && recoveryPossible
+            tapWindowReady && waitActionMiss > safetyMissThreshold && recoveryPossible
 
+        val actionCandidatesText = "WAIT:${waitActionMiss.toInt()} " +
+            "FLAP_SAFE:${bestSafePlan?.let { it.worstMiss.toInt() } ?: "NA"} " +
+            "FLAP_RESCUE:${bestRescuePlan?.let { it.worstMiss.toInt() } ?: "NA"}"
         val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
         val fallbackAction = if (shouldTap) RL_FLAP else RL_WAIT
         // Disable safe exploratory FLAPs while the controller is being calibrated.
@@ -1330,11 +1376,13 @@ class GameAccessibilityService : AccessibilityService() {
             !safeWindowValid -> "INVALID_SAFE_WINDOW"
             !gapTrusted -> "LOW_GAP_CONFIDENCE_WAIT"
             tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
+            waitActionMiss <= safetyMissThreshold -> "PATH_SAFE_WAIT"
             recoveryPossible && !tapWindowReady -> "WAIT_INTERTAP_INTERVAL"
-            zeroWorstMiss <= safetyMissThreshold -> "PATH_SAFE_WAIT"
-            recoveryPossible && bestPlanCount >= 3 -> "RECOVERY_PLAN_${bestPlanCount}_TAPS"
-            recoveryPossible -> "RECOVERY_PLAN_${bestPlanCount}_TAP"
-            else -> "NO_SAFE_RECOVERY_PLAN"
+            planFullySafe && bestPlanCount >= 3 -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAPS"
+            planFullySafe -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAP"
+            bestRescuePlan != null && bestPlanCount >= 3 -> "RECOVERY_SAME_SIDE_PLAN_${bestPlanCount}_TAPS"
+            bestRescuePlan != null -> "RECOVERY_SAME_SIDE_PLAN_${bestPlanCount}_TAP"
+            else -> "WAIT_NO_NONWORSENING_PLAN"
         }
         attemptLastDecision = decisionReason
         if (shouldTap) attemptFlapDecisions++ else attemptWaitDecisions++
@@ -1347,6 +1395,8 @@ class GameAccessibilityService : AccessibilityService() {
                 " planN=$bestPlanCount firstDelay=${firstTapDelay.toInt()}ms intervals=$scheduleText" +
                 " planEntry/Mid/Exit=${bestPlanEntryY.toInt()}/${bestPlanMiddleY.toInt()}/${bestPlanExitY.toInt()}" +
                 " miss0/plan=${zeroWorstMiss.toInt()}/${bestPlanMiss.toInt()}" +
+                " actionCandidates={$actionCandidatesText} selected=${if (shouldTap) "FLAP" else "WAIT"} " +
+                " planSafety=${if (planFullySafe) "FULL" else if (bestRescuePlan != null) "SAME_SIDE_RESCUE" else "NONE"}" +
                 " safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)}" +
                 " candidates={$scenarioText} schedules=$schedulesEvaluated elapsedSinceImpulse=${if (lastAutoTapAt > 0L) elapsedSinceLastImpulse.toInt() else -1}ms" +
                 " nextImpulseDelay=${firstTapDelay.toInt()}ms intervalReady=$tapWindowReady feedbackPending=$tapFeedbackPending" +
