@@ -1345,6 +1345,106 @@ class GameAccessibilityService : AccessibilityService() {
         return y + velocity * remaining + 0.5f * gravity * remaining * remaining
     }
 
+    private fun cancelScheduledInterceptTap(reason: String) {
+        val scheduled = scheduledInterceptRunnable ?: return
+        mainHandler.removeCallbacks(scheduled)
+        val oldTrack = scheduledInterceptTrackId
+        scheduledInterceptRunnable = null
+        scheduledInterceptTrackId = -1
+        scheduledInterceptAt = 0L
+        appendRunLog("INTERCEPT_DISPATCH_CANCEL reason=$reason trackId=$oldTrack")
+    }
+
+    private fun scheduleInterceptTap(
+        trackId: Int,
+        responseDelayMs: Float,
+        responseLatencyMs: Float,
+        tapX: Float,
+        tapY: Float,
+        baselineVelocity: Float,
+        baselineY: Int,
+        isRescue: Boolean
+    ): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val dispatchDelayMs = (responseDelayMs - responseLatencyMs).coerceAtLeast(0f)
+        val dueAt = now + dispatchDelayMs.toLong()
+        if (scheduledInterceptRunnable != null &&
+            scheduledInterceptTrackId == trackId &&
+            abs((dueAt - scheduledInterceptAt).toFloat()) <= 20f) {
+            return true
+        }
+        cancelScheduledInterceptTap("REPLANNED")
+        scheduledInterceptTrackId = trackId
+        scheduledInterceptAt = dueAt
+        val scheduled = Runnable {
+            if (scheduledInterceptTrackId == trackId && scheduledInterceptAt == dueAt) {
+                scheduledInterceptRunnable = null
+                scheduledInterceptTrackId = -1
+                scheduledInterceptAt = 0L
+                pendingPipeTapAt = 0L
+                pendingPipeTapTrackId = -1
+                val fireAt = SystemClock.elapsedRealtime()
+                val feedbackStillPending = synchronized(tapObservationLock) {
+                    pendingTapObservation != null
+                }
+                val spacingReady = lastAutoTapAt == 0L ||
+                    fireAt - lastAutoTapAt >= MIN_TAP_INTERVAL_MS
+                val valid = monitoring && !paused && !manual &&
+                    activePipeTrackId == trackId && !gestureInFlight.get() &&
+                    !feedbackStillPending && spacingReady
+                if (valid && tap(tapX, tapY, "COLLISION_INTERCEPT", baselineVelocity, baselineY)) {
+                    lastAutoTapAt = fireAt
+                    autoTapCount++
+                    attemptAutoTaps++
+                    attemptFlapDecisions++
+                    if (isRescue) sameSideRescueTapCount++
+                    attemptLastAction = "FLAP_COLLISION_INTERCEPT"
+                    attemptLastDecision = if (isRescue)
+                        "COLLISION_INTERCEPT_RESCUE_ONE_TAP" else "COLLISION_INTERCEPT_SAFE_ONE_TAP"
+                    appendRunLog(
+                        "ACTION_SPACE selected=FLAP reason=$attemptLastDecision " +
+                            "plannedResponseIn=${responseDelayMs.toInt()}ms actualDispatchDelay=${dispatchDelayMs.toInt()}ms " +
+                            "latencyEstimate=${responseLatencyMs.toInt()}ms replanAfterPhysicsFeedback=true"
+                    )
+                    screenStatus = "ПЕРЕХВАТ ТРУБЫ • коррекция по прогнозу"
+                } else {
+                    val reason = when {
+                        !monitoring || paused || manual -> "MONITORING_STOPPED"
+                        activePipeTrackId != trackId -> "TRACK_CHANGED"
+                        gestureInFlight.get() -> "GESTURE_BUSY"
+                        feedbackStillPending -> "PHYSICS_FEEDBACK_PENDING"
+                        !spacingReady -> "MIN_TAP_INTERVAL"
+                        else -> "TAP_REJECTED"
+                    }
+                    appendRunLog(
+                        "INTERCEPT_DISPATCH_SKIPPED trackId=$trackId reason=$reason " +
+                            "scheduledDelay=${dispatchDelayMs.toInt()}ms"
+                    )
+                }
+            }
+        }
+        scheduledInterceptRunnable = scheduled
+        mainHandler.postDelayed(scheduled, dispatchDelayMs.toLong())
+        pendingPipeTapAt = now + responseDelayMs.toLong()
+        pendingPipeTapTrackId = trackId
+        appendRunLog(
+            "INTERCEPT_DISPATCH_SCHEDULED trackId=$trackId responseIn=${responseDelayMs.toInt()}ms " +
+                "dispatchIn=${dispatchDelayMs.toInt()}ms latency=${responseLatencyMs.toInt()}ms " +
+                "dueAt=$dueAt rescue=$isRescue"
+        )
+        return true
+    }
+
+    private fun predictSingleTapVelocityAtPipe(
+        startVelocity: Float,
+        gravity: Float,
+        horizonMs: Float,
+        tapAtMs: Float
+    ): Float {
+        return if (tapAtMs >= horizonMs) startVelocity + gravity * horizonMs
+        else estimatedFlapVelocity + gravity * (horizonMs - tapAtMs)
+    }
+
     private fun predictSingleTapAtPipe(
         startY: Float,
         startVelocity: Float,
@@ -1434,6 +1534,7 @@ class GameAccessibilityService : AccessibilityService() {
         if (!monitoring || paused || manual) return
         val now = SystemClock.elapsedRealtime()
         if (!d.activeGame) {
+            cancelScheduledInterceptTap("GAME_OVER")
             if (pendingRlState != null || qLearningEpisode.isNotEmpty()) finishQLearningAttempt(true)
             appendRunLog("FRAME state=GAME_OVER msg=" + d.message)
             previousBirdY = -1
@@ -1538,6 +1639,7 @@ class GameAccessibilityService : AccessibilityService() {
         val hasGap = d.obstacleX > d.birdX && !horizontalControlOverlap &&
             d.gapTop >= 0 && d.gapBottom > d.gapTop
         if (pendingPipeTapAt > 0L && pendingPipeTapTrackId != activePipeTrackId) {
+            cancelScheduledInterceptTap("TRACK_CHANGED")
             appendRunLog(
                 "PIPE_TAP_PLAN_CANCEL reason=TRACK_CHANGED oldTrack=$pendingPipeTapTrackId newTrack=$activePipeTrackId"
             )
@@ -1558,14 +1660,22 @@ class GameAccessibilityService : AccessibilityService() {
             if (pipeCrossingWithKnownGap &&
                 lastInterceptPredictionTrackId == activePipeTrackId &&
                 lastInterceptPredictedY.isFinite()) {
+                val predictionAgeMs = if (lastInterceptPredictionAt > 0L)
+                    now - lastInterceptPredictionAt else 0L
+                val predictionAge = predictionAgeMs.toFloat()
+                val adjustedExpectedY = lastInterceptPredictedY +
+                    lastInterceptPredictedVelocity * predictionAge +
+                    0.5f * estimatedGravity * predictionAge * predictionAge
                 appendRunLog(
                     "COLLISION_INTERCEPT_ACTUAL trackId=$activePipeTrackId " +
                         "predictedEntryY=${lastInterceptPredictedY.toInt()} actualY=${d.birdY} " +
-                        "delta=${(d.birdY - lastInterceptPredictedY).toInt()}px " +
-                        "timingError=${if (lastInterceptPredictionAt > 0L) now - lastInterceptPredictionAt else 0L}ms"
+                        "rawDelta=${(d.birdY - lastInterceptPredictedY).toInt()}px " +
+                        "timeAdjustedDelta=${(d.birdY - adjustedExpectedY).toInt()}px " +
+                        "timingError=${predictionAgeMs}ms predictedVelocity=${fmt(lastInterceptPredictedVelocity)}"
                 )
                 lastInterceptPredictionTrackId = -1
                 lastInterceptPredictedY = Float.NaN
+                lastInterceptPredictedVelocity = Float.NaN
                 lastInterceptPredictionAt = 0L
             }
             if (pipeCrossingWithKnownGap) {
@@ -1717,7 +1827,7 @@ class GameAccessibilityService : AccessibilityService() {
                     )
                 }
                 val tapWindowReady = bestCrossingPlan != null &&
-                    firstTapDelay <= crossingReactionMs + 45f
+                    firstTapDelay <= crossingReactionMs + 12f
                 val canDispatchCrossingTap = !tapFeedbackPending && !hadTapFeedback &&
                     tapSpacingReady && !gestureInFlight.get()
                 val shouldCrossingTap = crossingPlanValid && tapWindowReady && canDispatchCrossingTap
@@ -1981,6 +2091,48 @@ class GameAccessibilityService : AccessibilityService() {
             else -> 0
         }
 
+        // The passed opening and the next visible opening form a sloped corridor.
+        // Both pipe edges move at almost the same speed, so their relative progress is predictable.
+        val previousMemoryAge = if (previousPassedPipeAt > 0L) now - previousPassedPipeAt else Long.MAX_VALUE
+        val previousPipeRightNow = if (previousPassedPipeRightX >= 0 && previousMemoryAge in 0L..3500L)
+            previousPassedPipeRightX - obstacleSpeed * previousMemoryAge.toFloat() else -1f
+        val corridorSpan = pipeLeftEdgeForPlan - previousPipeRightNow
+        val corridorActive = previousPassedGapTop >= 0 &&
+            previousPassedGapBottom > previousPassedGapTop &&
+            previousPassedGapConfidence >= 0.55f &&
+            previousMemoryAge in 0L..3500L &&
+            previousPipeRightNow >= 0f &&
+            corridorSpan > fieldWidth * 0.12f &&
+            timeToPipe >= 180f
+        val corridorTimes = if (corridorActive)
+            floatArrayOf(timeToPipe * 0.20f, timeToPipe * 0.40f, timeToPipe * 0.60f, timeToPipe * 0.80f)
+        else floatArrayOf()
+        val corridorHeight = if (corridorActive)
+            min(previousPassedGapBottom - previousPassedGapTop, gapBottom - gapTop).toFloat()
+        else 0f
+        val corridorMargin = max(fieldHeight * 0.012f, corridorHeight * 0.075f)
+        fun corridorProgressAt(timeMs: Float): Float {
+            if (!corridorActive) return 1f
+            val projectedPreviousRight = previousPipeRightNow - obstacleSpeed * timeMs
+            val projectedNextLeft = pipeLeftEdgeForPlan - obstacleSpeed * timeMs
+            val span = (projectedNextLeft - projectedPreviousRight).coerceAtLeast(1f)
+            return ((d.birdX - projectedPreviousRight) / span).coerceIn(0f, 1f)
+        }
+        fun corridorMissAt(centerY: Float, timeMs: Float): Float {
+            if (!corridorActive) return 0f
+            val progress = corridorProgressAt(timeMs)
+            val top = previousPassedGapTop + (gapTop - previousPassedGapTop) * progress
+            val bottom = previousPassedGapBottom + (gapBottom - previousPassedGapBottom) * progress
+            val allowedTop = top + corridorMargin + birdHalfHeight
+            val allowedBottom = bottom - corridorMargin - birdHalfHeight
+            if (allowedBottom <= allowedTop) return max(allowedTop - allowedBottom, fieldHeight * 0.1f)
+            return max(
+                (allowedTop - centerY).coerceAtLeast(0f),
+                (centerY - allowedBottom).coerceAtLeast(0f)
+            )
+        }
+        val corridorProgressNow = if (corridorActive) corridorProgressAt(0f) else -1f
+
         var waitWorstMiss = 0f
         var waitMissSum = 0f
         var waitEntryY = d.birdY.toFloat()
@@ -2000,8 +2152,20 @@ class GameAccessibilityService : AccessibilityService() {
             waitWorstMiss = max(waitWorstMiss, miss)
             waitMissSum += miss
         }
-        val waitMeanMiss = waitMissSum / sampleTimes.size.toFloat()
-        val missThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
+        var waitCorridorMiss = 0f
+        if (corridorActive) {
+            for (corridorTime in corridorTimes) {
+                val y = d.birdY + velocity * corridorTime + 0.5f * gravity * corridorTime * corridorTime
+                val miss = corridorMissAt(y, corridorTime)
+                waitCorridorMiss = max(waitCorridorMiss, miss)
+                waitWorstMiss = max(waitWorstMiss, miss)
+                waitMissSum += miss
+            }
+        }
+        val waitMeanMiss = waitMissSum / (sampleTimes.size + corridorTimes.size).toFloat()
+        val missThreshold = if (corridorActive)
+            max(gapHeight * 0.05f, fieldHeight * 0.012f)
+        else max(gapHeight * 0.12f, fieldHeight * 0.02f)
         val minUsefulImprovement = max(7f, safeMargin * 0.06f)
 
         // Search one impulse only. Prefer the latest response that still places the full
@@ -2060,7 +2224,21 @@ class GameAccessibilityService : AccessibilityService() {
                     oppositeCollision = true
                 }
             }
-            val meanMiss = missSum / sampleTimes.size.toFloat()
+            if (corridorActive) {
+                for (corridorTime in corridorTimes) {
+                    val y = predictSingleTapAtPipe(
+                        d.birdY.toFloat(), velocity, gravity, corridorTime, delayMs
+                    )
+                    minY = min(minY, y)
+                    maxY = max(maxY, y)
+                    minTop = min(minTop, y - birdHalfHeight)
+                    maxBottom = max(maxBottom, y + birdHalfHeight)
+                    val miss = corridorMissAt(y, corridorTime)
+                    worstMiss = max(worstMiss, miss)
+                    missSum += miss
+                }
+            }
+            val meanMiss = missSum / (sampleTimes.size + corridorTimes.size).toFloat()
             candidatesEvaluated++
             if (worstMiss <= 0f) {
                 // Among fully safe single-tap solutions choose the latest response time.
@@ -2127,35 +2305,32 @@ class GameAccessibilityService : AccessibilityService() {
             else -> "NO_SAFE_INTERCEPT"
         }
         val planValid = searchWindowExists && selectedExists
-        val tapDispatchWindow = reactionMs + 30f
         val canDispatchTap = !tapFeedbackPending && !hadTapFeedback &&
             tapSpacingReady && !gestureInFlight.get()
-        val shouldTap = planValid && selectedDelay <= tapDispatchWindow && canDispatchTap
+        val shouldScheduleTap = planValid && canDispatchTap
 
-        if (!planValid && pendingPipeTapAt > 0L &&
-            pendingPipeTapTrackId == activePipeTrackId) {
-            appendRunLog(
-                "PIPE_TAP_PLAN_CANCEL reason=INTERCEPT_NO_LONGER_VALID trackId=$activePipeTrackId"
-            )
-            pendingPipeTapAt = 0L
-            pendingPipeTapTrackId = -1
-        } else if (planValid && selectedDelay > tapDispatchWindow) {
-            val newTargetAt = now + selectedDelay.toLong()
-            if (pendingPipeTapAt == 0L || pendingPipeTapTrackId != activePipeTrackId ||
-                abs((pendingPipeTapAt - newTargetAt).toFloat()) > 35f) {
-                pendingPipeTapAt = newTargetAt
-                pendingPipeTapTrackId = activePipeTrackId
-                appendRunLog(
-                    "PIPE_TAP_PLAN_SCHEDULED source=COLLISION_INTERCEPT trackId=$activePipeTrackId " +
-                        "responseIn=${selectedDelay.toInt()}ms dispatchIn=${(selectedDelay - reactionMs).toInt()}ms " +
-                        "mode=$planMode miss=${selectedMiss.toInt()}"
-                )
+        if (!planValid) {
+            if (scheduledInterceptRunnable != null) cancelScheduledInterceptTap("PLAN_NO_LONGER_VALID")
+            if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) {
+                appendRunLog("PIPE_TAP_PLAN_CANCEL reason=INTERCEPT_NO_LONGER_VALID trackId=$activePipeTrackId")
+                pendingPipeTapAt = 0L
+                pendingPipeTapTrackId = -1
             }
+        } else if (shouldScheduleTap) {
+            scheduleInterceptTap(
+                activePipeTrackId, selectedDelay, reactionMs,
+                tapX, tapY, velocity, d.birdY, !useSafePlan
+            )
+        } else if (tapFeedbackPending || hadTapFeedback || !tapSpacingReady || gestureInFlight.get()) {
+            cancelScheduledInterceptTap("ACTION_TEMPORARILY_BLOCKED")
         }
 
         val predictedEntryY = if (selectedExists) selectedEntryY else waitEntryY
         lastInterceptPredictionTrackId = activePipeTrackId
         lastInterceptPredictedY = predictedEntryY
+        lastInterceptPredictedVelocity = if (selectedExists)
+            predictSingleTapVelocityAtPipe(velocity, gravity, timeToPipe, selectedDelay)
+        else velocity + gravity * timeToPipe
         lastInterceptPredictionAt = now + timeToPipe.toLong()
 
         val stateKey = encodeQLearningState(
@@ -2176,9 +2351,7 @@ class GameAccessibilityService : AccessibilityService() {
             !selectedExists && bestRescueDelay >= 0f &&
                 sameSideRescueTapCount >= MAX_RESCUE_TAPS_PER_PIPE -> "RESCUE_TAP_BUDGET_EXHAUSTED"
             !selectedExists -> "NO_SAFE_SINGLE_TAP_INTERCEPT"
-            selectedDelay > tapDispatchWindow -> "WAIT_PLANNED_INTERCEPT_${selectedDelay.toInt()}MS"
-            gestureInFlight.get() -> "WAIT_GESTURE_IN_FLIGHT"
-            else -> "COLLISION_INTERCEPT_READY"
+            else -> "COLLISION_INTERCEPT_PLANNED"
         }
         attemptLastDecision = decisionReason
         appendRunLog(
@@ -2190,61 +2363,42 @@ class GameAccessibilityService : AccessibilityService() {
                 "waitTopBottom=${waitMinTop.toInt()}..${waitMaxBottom.toInt()} " +
                 "gap=${gapTop.toInt()}..${gapBottom.toInt()} safeCenter=${safeTop.toInt()}..${safeBottom.toInt()} " +
                 "margin=${safeMargin.toInt()} confidence=${fmt(d.pipeConfidence)} " +
+                "corridor=${if (corridorActive) "ON" else "OFF"} prevGap=${previousPassedGapTop}..${previousPassedGapBottom} " +
+                "progress=${fmt(corridorProgressNow)} corridorWaitMiss=${waitCorridorMiss.toInt()} " +
                 "candidateDelay=${if (selectedExists) selectedDelay.toInt() else -1}ms " +
                 "candidateY=${if (selectedExists) selectedEntryY.toInt() else -1} " +
                 "candidateRange=${if (selectedExists) "${selectedMinY.toInt()}..${selectedMaxY.toInt()}" else "NONE"} " +
                 "candidateTopBottom=${if (selectedExists) "${selectedMinTop.toInt()}..${selectedMaxBottom.toInt()}" else "NONE"} " +
                 "candidateMiss=${selectedMiss.toInt()} meanMiss=${selectedMeanMiss.toInt()} " +
-                "candidates=$candidatesEvaluated actions={$actionCandidatesText} " +
-                "selected=${if (shouldTap) "FLAP" else "WAIT"} mode=$planMode " +
-                "feedbackPending=$tapFeedbackPending feedbackResolved=$hadTapFeedback " +
+                "candidates=$candidatesEvaluated actions={$actionCandidatesText} scheduled=$shouldScheduleTap " +
+                "dispatchIn=${if (selectedExists) (selectedDelay - reactionMs).coerceAtLeast(0f).toInt() else -1}ms " +
+                "latency=${fmt(reactionMs)}ms mode=$planMode feedbackPending=$tapFeedbackPending " +
                 "spacingReady=$tapSpacingReady pendingTapIn=${if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L}ms " +
                 "reason=$decisionReason"
         )
 
-        var actualAction = RL_WAIT
-        if (shouldTap && tap(tapX, tapY, "COLLISION_INTERCEPT", velocity, d.birdY)) {
-            actualAction = RL_FLAP
-            lastAutoTapAt = now
-            pendingPipeTapAt = 0L
-            pendingPipeTapTrackId = -1
-            autoTapCount++
-            attemptAutoTaps++
-            attemptFlapDecisions++
-            if (!useSafePlan) sameSideRescueTapCount++
-            attemptLastAction = "FLAP_COLLISION_INTERCEPT"
-            attemptLastDecision = if (useSafePlan)
-                "COLLISION_INTERCEPT_SAFE_ONE_TAP" else "COLLISION_INTERCEPT_RESCUE_ONE_TAP"
-            appendRunLog(
-                "ACTION_SPACE selected=FLAP reason=$attemptLastDecision " +
-                    "responseDelay=${selectedDelay.toInt()}ms nextTapOnly=true replanAfterPhysicsFeedback=true"
-            )
-            screenStatus = "ПЕРЕХВАТ ТРУБЫ • тап по расчёту через ${selectedDelay.toInt()}мс"
-        } else {
-            attemptWaitDecisions++
-            attemptLastAction = "WAIT_COLLISION_INTERCEPT"
-            val reason = when {
-                tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
-                hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
-                !tapSpacingReady -> "MIN_TAP_INTERVAL"
-                gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
-                !distanceWindow -> "OUT_OF_RANGE"
-                !gapTrusted -> "LOW_GAP_CONFIDENCE"
-                waitWorstMiss <= missThreshold -> "PREDICTED_PATH_SAFE"
-                maxResponseDelay < minResponseDelay -> "NO_PRECONTACT_WINDOW"
-                !selectedExists -> "NO_SAFE_SINGLE_TAP_INTERCEPT"
-                selectedDelay > tapDispatchWindow -> "PLANNED_TAP_IN_${selectedDelay.toInt()}MS"
-                else -> "TAP_NOT_DISPATCHED"
-            }
-            appendRunLog("ACTION_SPACE selected=WAIT reason=$reason planMode=$planMode")
-            screenStatus = when {
-                waitWorstMiss <= missThreshold -> "ТРУБА • траектория проходит в просвет"
-                selectedExists && selectedDelay > tapDispatchWindow ->
-                    "ПОДВОД К ПРОСВЕТУ • тап через ${selectedDelay.toInt()}мс"
-                else -> "ПРОГНОЗ ТРУБЫ • $reason"
-            }
+        attemptWaitDecisions++
+        attemptLastAction = if (shouldScheduleTap) "SCHEDULE_COLLISION_INTERCEPT" else "WAIT_COLLISION_INTERCEPT"
+        val waitReason = when {
+            tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
+            hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
+            !tapSpacingReady -> "MIN_TAP_INTERVAL"
+            gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
+            !distanceWindow -> "OUT_OF_RANGE"
+            !gapTrusted -> "LOW_GAP_CONFIDENCE"
+            waitWorstMiss <= missThreshold -> "PREDICTED_PATH_SAFE"
+            maxResponseDelay < minResponseDelay -> "NO_PRECONTACT_WINDOW"
+            !selectedExists -> decisionReason
+            shouldScheduleTap -> "DISPATCH_SCHEDULED_IN_${(selectedDelay - reactionMs).coerceAtLeast(0f).toInt()}MS"
+            else -> "NO_DISPATCH"
         }
-        observeQLearningDecision(stateKey, actualAction, now, pipePassed)
+        appendRunLog("ACTION_SPACE selected=WAIT reason=$waitReason planMode=$planMode")
+        screenStatus = when {
+            shouldScheduleTap -> "ПОДВОД К ПРОСВЕТУ • тапаю по времени"
+            waitWorstMiss <= missThreshold -> "ТРУБА • траектория проходит в просвет"
+            else -> "ПРОГНОЗ ТРУБЫ • $waitReason"
+        }
+        observeQLearningDecision(stateKey, RL_WAIT, now, pipePassed)
     }
 
     private fun startMonitoringInternal() {
@@ -2267,12 +2421,12 @@ class GameAccessibilityService : AccessibilityService() {
             qLearningUpdatedAt + " checksum=" + qLearningChecksum +
             " totalPipes=" + qLearningTotalPipePasses + " totalEpisodes=" + qLearningTotalEpisodes)
         appendRunLog("FLAP_CALIBRATION_SESSION value=" + fmt(estimatedFlapVelocity) + " loaded=" + flapCalibrationLoaded)
-        appendRunLog("TAP_LATENCY_SESSION value=${fmt(estimatedTapResponseLatencyMs)}ms samples=$tapLatencySamples")
         wasActiveGame = false
         cancelScheduledInterceptTap("NEW_SESSION")
         resetPipeGeometryMemory()
         estimatedTapResponseLatencyMs = 68f
         tapLatencySamples = 0
+        appendRunLog("TAP_LATENCY_SESSION value=${fmt(estimatedTapResponseLatencyMs)}ms samples=$tapLatencySamples")
         lastCaptureStartedAt = 0L
         nextScreenshotAllowedAt = 0L
         screenshotIntervalMs = 650L
@@ -2309,6 +2463,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun stopMonitoring(reason: String = "Мониторинг остановлен") {
+        cancelScheduledInterceptTap("MONITORING_STOPPED")
         finishQLearningAttempt(false)
         finishAttemptDiagnostics("STOPPED")
         if (wasActiveGame && attemptCount > 0) recordAttemptEnd("INTERRUPTED:" + reason)
@@ -2330,6 +2485,7 @@ class GameAccessibilityService : AccessibilityService() {
         baselineVelocity: Float = previousVerticalVelocity,
         baselineY: Int = previousBirdY
     ): Boolean {
+        if (source != "COLLISION_INTERCEPT") cancelScheduledInterceptTap("OTHER_TAP_$source")
         val tapId = ++tapSequence
         val requestedAt = SystemClock.elapsedRealtime()
         appendRunLog("TAP_REQUEST id=$tapId source=$source x=${x.toInt()} y=${y.toInt()}")
