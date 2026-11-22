@@ -69,6 +69,9 @@ class GameAccessibilityService : AccessibilityService() {
     // Planned impulse time is a predicted in-game response time, not a blind tap timer.
     private var pendingPipeTapAt = 0L
     private var pendingPipeTapTrackId = -1
+    private var lastInterceptPredictionTrackId = -1
+    private var lastInterceptPredictedY = Float.NaN
+    private var lastInterceptPredictionAt = 0L
     private data class PendingTapObservation(
         val id: Long,
         val source: String,
@@ -1234,6 +1237,23 @@ class GameAccessibilityService : AccessibilityService() {
         return y + velocity * remaining + 0.5f * gravity * remaining * remaining
     }
 
+    private fun predictSingleTapAtPipe(
+        startY: Float,
+        startVelocity: Float,
+        gravity: Float,
+        horizonMs: Float,
+        tapAtMs: Float
+    ): Float {
+        val tapAt = tapAtMs.coerceAtLeast(0f)
+        if (tapAt >= horizonMs) {
+            return startY + startVelocity * horizonMs + 0.5f * gravity * horizonMs * horizonMs
+        }
+        val yAtTap = startY + startVelocity * tapAt + 0.5f * gravity * tapAt * tapAt
+        val remaining = (horizonMs - tapAt).coerceAtLeast(0f)
+        // The learned value is the absolute vertical speed immediately after a flap.
+        return yAtTap + estimatedFlapVelocity * remaining + 0.5f * gravity * remaining * remaining
+    }
+
     private fun updateTapFeedback(
         now: Long, dt: Float, rawVelocity: Float, gravity: Float
     ): TapFeedbackResult {
@@ -1427,6 +1447,19 @@ class GameAccessibilityService : AccessibilityService() {
             // Keep the controller active until the actual sprite rectangles separate.
             val pipeCrossingWithKnownGap = horizontalControlOverlap &&
                 d.gapTop >= 0 && d.gapBottom > d.gapTop
+            if (pipeCrossingWithKnownGap &&
+                lastInterceptPredictionTrackId == activePipeTrackId &&
+                lastInterceptPredictedY.isFinite()) {
+                appendRunLog(
+                    "COLLISION_INTERCEPT_ACTUAL trackId=$activePipeTrackId " +
+                        "predictedEntryY=${lastInterceptPredictedY.toInt()} actualY=${d.birdY} " +
+                        "delta=${(d.birdY - lastInterceptPredictedY).toInt()}px " +
+                        "predictionAge=${if (lastInterceptPredictionAt > 0L) now - lastInterceptPredictionAt else -1L}ms"
+                )
+                lastInterceptPredictionTrackId = -1
+                lastInterceptPredictedY = Float.NaN
+                lastInterceptPredictionAt = 0L
+            }
             if (pipeCrossingWithKnownGap) {
                 val crossingGapHeight = (d.gapBottom - d.gapTop).toFloat()
                 val crossingSafeTop = d.gapTop + crossingGapHeight * 0.18f
@@ -1775,10 +1808,12 @@ class GameAccessibilityService : AccessibilityService() {
         val gapTop = d.gapTop.toFloat()
         val gapBottom = d.gapBottom.toFloat()
         val gapHeight = (gapBottom - gapTop).coerceAtLeast(1f)
-        val targetY = gapTop + gapHeight * 0.50f
-        val birdHalfWidth = if (d.birdLeft >= 0 && d.birdRight > d.birdLeft)
-            (d.birdRight - d.birdLeft) * 0.5f else fieldWidth * 0.018f
-        val distance = (d.obstacleX - d.birdX - birdHalfWidth - fieldWidth * 0.006f).toFloat()
+
+        // Time-to-contact is measured from the bird's RIGHT edge to the pipe's LEFT edge.
+        // This is the horizontal instant when the two collision rectangles first touch.
+        val birdRightEdgeForPlan = d.birdRight.takeIf { it >= 0 } ?: (d.birdX + fieldWidth * 0.018f).toInt()
+        val pipeLeftEdgeForPlan = d.pipeLeft.takeIf { it >= 0 } ?: d.obstacleX
+        val distance = (pipeLeftEdgeForPlan - birdRightEdgeForPlan - fieldWidth * 0.006f).toFloat()
 
         val obstacleDt = if (previousObstacleAt > 0L) (now - previousObstacleAt).coerceAtLeast(1L).toFloat() else 0f
         val measuredSpeed = if (previousObstacleX > d.obstacleX && obstacleDt in 35f..500f)
@@ -1793,301 +1828,304 @@ class GameAccessibilityService : AccessibilityService() {
         previousObstacleAt = now
 
         val timeToPipe = (distance / obstacleSpeed).coerceIn(0f, 1400f)
-        // Different inter-tap timings create different lifts. Search complete schedules
-        // from one to four taps, execute only the first tap, then re-plan from measured motion.
         val reactionMs = 65f
         val confidenceExtraMargin = ((0.55f - d.pipeConfidence).coerceAtLeast(0f) / 0.25f)
             .coerceAtMost(1f) * gapHeight * 0.045f
         val safeMargin = (gapHeight * 0.10f + confidenceExtraMargin)
             .coerceAtLeast(fieldHeight * 0.010f)
+        // Use the detected sprite height, not a fixed normal-size bird. This adapts to potions.
         val birdHalfHeight = if (d.birdTop >= 0 && d.birdBottom > d.birdTop)
             (d.birdBottom - d.birdTop) * 0.5f else fieldHeight * 0.04f
-        val safeTop = gapTop + safeMargin + birdHalfHeight
-        val safeBottom = gapBottom - safeMargin - birdHalfHeight
+        val collisionSafeTop = gapTop + safeMargin
+        val collisionSafeBottom = gapBottom - safeMargin
+        val safeTop = collisionSafeTop + birdHalfHeight
+        val safeBottom = collisionSafeBottom - birdHalfHeight
         val safeWindowValid = safeBottom > safeTop
         val distanceWindow = distance > 0f && distance < fieldWidth * 2.5f
-
-        fun missDistance(y: Float): Float = when {
-            y < safeTop -> safeTop - y
-            y > safeBottom -> y - safeBottom
-            else -> 0f
-        }
+        val gapTrusted = d.pipeConfidence >= MIN_GAP_CONFIDENCE_FOR_CONTROL &&
+            gapHeight >= fieldHeight * 0.08f && gapHeight <= fieldHeight * 0.62f
 
         val pipeWidth = if (d.pipeLeft >= 0 && d.pipeRight > d.pipeLeft)
             (d.pipeRight - d.pipeLeft).toFloat() else fieldWidth * 0.08f
         val birdWidth = if (d.birdLeft >= 0 && d.birdRight > d.birdLeft)
             (d.birdRight - d.birdLeft).toFloat() else fieldWidth * 0.04f
-        // Test the complete horizontal overlap: pipe entry, middle, and exit.
-        val collisionDuration = ((pipeWidth + birdWidth) / obstacleSpeed).coerceIn(90f, 300f)
-        val middleTime = timeToPipe + collisionDuration * 0.5f
+        // Check the whole horizontal overlap, not just the first touch.
+        val collisionDuration = ((pipeWidth + birdWidth) / obstacleSpeed).coerceIn(90f, 320f)
         val exitTime = timeToPipe + collisionDuration
-        val zeroEntryY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, timeToPipe, floatArrayOf())
-        val zeroMiddleY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, middleTime, floatArrayOf())
-        val zeroExitY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, exitTime, floatArrayOf())
-        val zeroMisses = floatArrayOf(missDistance(zeroEntryY), missDistance(zeroMiddleY), missDistance(zeroExitY))
-        val zeroWorstMiss = zeroMisses.maxOrNull() ?: 0f
-        val zeroMeanMiss = zeroMisses.average().toFloat()
+        val sampleTimes = floatArrayOf(
+            timeToPipe,
+            timeToPipe + collisionDuration * 0.25f,
+            timeToPipe + collisionDuration * 0.50f,
+            timeToPipe + collisionDuration * 0.75f,
+            exitTime
+        )
 
-        val bestByTapCount = arrayOfNulls<TapPlan>(5)
-        val allTapPlans = ArrayList<TapPlan>(64)
-        // WAIT is a first-class action: the zero-tap ballistic trajectory above is its
-        // full entry/middle/exit evaluation. FLAP candidates are compared against it.
-        val waitActionMiss = zeroWorstMiss
-        // Different intervals create different lifts; preserve all schedules rather than
-        // retaining only the mathematically best miss for each tap count.
-        val interTapIntervals = floatArrayOf(250f, 320f, 400f, 480f)
-        val elapsedSinceLastImpulse = if (lastAutoTapAt > 0L)
-            (now - lastAutoTapAt).toFloat() - reactionMs else Float.POSITIVE_INFINITY
-        val pendingResponseDelay = if (pendingPipeTapAt > 0L &&
-            pendingPipeTapTrackId == activePipeTrackId) {
-            (pendingPipeTapAt - now).toFloat().coerceAtLeast(reactionMs)
-        } else null
-        val initialTapChoices = if (lastAutoTapAt > 0L) {
-            interTapIntervals.map { (it - elapsedSinceLastImpulse).coerceAtLeast(reactionMs) }
-        } else listOf(65f, 160f, 220f, 280f, 340f)
-        val firstTapDelays = (initialTapChoices + listOfNotNull(pendingResponseDelay))
-            .distinct().sorted().toFloatArray()
-        var schedulesEvaluated = 0
-
-        fun evaluateSchedule(schedule: List<Float>) {
-            if (schedule.isEmpty() || schedule.size > 4) return
-            if (schedule.last() + 35f >= timeToPipe) return
-            val taps = schedule.toFloatArray()
-            val entryY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, timeToPipe, taps)
-            val middleY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, middleTime, taps)
-            val exitY = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, exitTime, taps)
-            val misses = floatArrayOf(missDistance(entryY), missDistance(middleY), missDistance(exitY))
-            val worstMiss = misses.maxOrNull() ?: 0f
-            val meanMiss = misses.average().toFloat()
-            val pendingScheduleMatch = pendingResponseDelay != null &&
-                abs(schedule.first() - pendingResponseDelay) <= 12f
-            // When safety is otherwise equal, postpone a flap instead of applying it too early.
-            // If a response-time was already scheduled for this pipe, preserve that exact plan.
-            val delayPreference = min(schedule.first(), 340f) * 0.025f
-            val pendingPlanBonus = if (pendingScheduleMatch) 10000f else 0f
-            val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f -
-                delayPreference - pendingPlanBonus
-            val candidate = TapPlan(taps, entryY, middleY, exitY, worstMiss, meanMiss, score)
-            allTapPlans.add(candidate)
-            schedulesEvaluated++
-            val count = schedule.size
-            val previous = bestByTapCount[count]
-            if (previous == null || score < previous.score) bestByTapCount[count] = candidate
+        fun missAtCenter(centerY: Float): Float {
+            val predictedTop = centerY - birdHalfHeight
+            val predictedBottom = centerY + birdHalfHeight
+            val topMiss = (collisionSafeTop - predictedTop).coerceAtLeast(0f)
+            val bottomMiss = (predictedBottom - collisionSafeBottom).coerceAtLeast(0f)
+            return max(topMiss, bottomMiss)
+        }
+        fun collisionSide(centerY: Float): Int = when {
+            centerY < safeTop -> -1
+            centerY > safeBottom -> 1
+            else -> 0
         }
 
-        fun expandSchedules(schedule: MutableList<Float>) {
-            evaluateSchedule(schedule)
-            if (schedule.size >= 4) return
-            val previousAt = schedule.last()
-            for (interval in interTapIntervals) {
-                val nextAt = previousAt + interval
-                if (nextAt + 35f >= timeToPipe) continue
-                schedule.add(nextAt)
-                expandSchedules(schedule)
-                schedule.removeAt(schedule.lastIndex)
-            }
+        var waitWorstMiss = 0f
+        var waitMissSum = 0f
+        var waitEntryY = d.birdY.toFloat()
+        var waitMinY = Float.POSITIVE_INFINITY
+        var waitMaxY = Float.NEGATIVE_INFINITY
+        var waitMinTop = Float.POSITIVE_INFINITY
+        var waitMaxBottom = Float.NEGATIVE_INFINITY
+        for (i in sampleTimes.indices) {
+            val horizon = sampleTimes[i]
+            val y = d.birdY + velocity * horizon + 0.5f * gravity * horizon * horizon
+            if (i == 0) waitEntryY = y
+            waitMinY = min(waitMinY, y)
+            waitMaxY = max(waitMaxY, y)
+            waitMinTop = min(waitMinTop, y - birdHalfHeight)
+            waitMaxBottom = max(waitMaxBottom, y + birdHalfHeight)
+            val miss = missAtCenter(y)
+            waitWorstMiss = max(waitWorstMiss, miss)
+            waitMissSum += miss
         }
-        if (distanceWindow && safeWindowValid && timeToPipe > reactionMs + 35f) {
-            for (firstDelay in firstTapDelays) {
-                if (firstDelay + 35f >= timeToPipe) continue
-                expandSchedules(mutableListOf(firstDelay))
-            }
-        }
-
+        val waitMeanMiss = waitMissSum / sampleTimes.size.toFloat()
+        val missThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
         val minUsefulImprovement = max(7f, safeMargin * 0.06f)
-        fun sameOrImprovedSide(candidateY: Float, naturalY: Float): Boolean {
-            val naturalSide = when {
-                naturalY < safeTop -> -1
-                naturalY > safeBottom -> 1
-                else -> 0
-            }
-            val candidateSide = when {
-                candidateY < safeTop -> -1
-                candidateY > safeBottom -> 1
-                else -> 0
-            }
-            return when (naturalSide) {
-                0 -> candidateSide == 0
-                -1 -> candidateSide != 1
-                else -> candidateSide != -1
-            }
-        }
-        fun doesNotReverseIntoOppositeCollision(candidate: TapPlan): Boolean =
-            sameOrImprovedSide(candidate.entryY, zeroEntryY) &&
-                sameOrImprovedSide(candidate.middleY, zeroMiddleY) &&
-                sameOrImprovedSide(candidate.exitY, zeroExitY)
 
-        // Prefer a plan that keeps the entire horizontal overlap inside the safe window.
-        // If no fully-safe tap plan exists, permit a same-side rescue only when it improves
-        // the natural trajectory and never turns a low-side miss into a high-side collision.
-        val bestSafePlan = allTapPlans
-            .filter { it.worstMiss <= 0f }
-            .minByOrNull { it.score }
-        // Progressive recovery only needs a useful same-side improvement; one tap is
-        // executed at a time, then the controller re-plans using measured movement.
-        val rescueMissLimit = max(fieldHeight * 0.23f, gapHeight * 0.55f)
-        val rescueBudgetAvailable = sameSideRescueTapCount < MAX_RESCUE_TAPS_PER_PIPE &&
-            waitActionMiss <= rescueMissLimit * 1.35f
-        val bestRescuePlan = if (bestSafePlan == null && rescueBudgetAvailable) {
-            allTapPlans
-                .filter {
-                    it.worstMiss <= rescueMissLimit &&
-                        it.worstMiss + minUsefulImprovement < waitActionMiss &&
-                        doesNotReverseIntoOppositeCollision(it)
+        // Search one impulse only. Prefer the latest response that still places the full
+        // sprite inside the opening: early taps create unnecessary lift and can hit the upper pipe.
+        val elapsedSinceLastTap = if (lastAutoTapAt > 0L)
+            (now - lastAutoTapAt).toFloat() else Float.POSITIVE_INFINITY
+        val spacingRemaining = if (elapsedSinceLastTap.isFinite())
+            (MIN_TAP_INTERVAL_MS.toFloat() - elapsedSinceLastTap).coerceAtLeast(0f) else 0f
+        val minResponseDelay = max(reactionMs, spacingRemaining + reactionMs)
+        // The planned flap response must happen BEFORE the bird first touches the pipe.
+        val maxResponseDelay = min(680f, timeToPipe - 15f)
+        var bestSafeDelay = -1f
+        var bestSafeEntryY = waitEntryY
+        var bestSafeMinY = waitMinY
+        var bestSafeMaxY = waitMaxY
+        var bestSafeMinTop = waitMinTop
+        var bestSafeMaxBottom = waitMaxBottom
+        var bestRescueDelay = -1f
+        var bestRescueMiss = Float.POSITIVE_INFINITY
+        var bestRescueMeanMiss = Float.POSITIVE_INFINITY
+        var bestRescueEntryY = waitEntryY
+        var bestRescueMinY = waitMinY
+        var bestRescueMaxY = waitMaxY
+        var bestRescueMinTop = waitMinTop
+        var bestRescueMaxBottom = waitMaxBottom
+        var candidatesEvaluated = 0
+
+        fun evaluateInterceptDelay(delayMs: Float) {
+            if (delayMs < 0f || delayMs > maxResponseDelay + 0.5f) return
+            var worstMiss = 0f
+            var missSum = 0f
+            var entryY = d.birdY.toFloat()
+            var minY = Float.POSITIVE_INFINITY
+            var maxY = Float.NEGATIVE_INFINITY
+            var minTop = Float.POSITIVE_INFINITY
+            var maxBottom = Float.NEGATIVE_INFINITY
+            var oppositeCollision = false
+            for (i in sampleTimes.indices) {
+                val horizon = sampleTimes[i]
+                val y = predictSingleTapAtPipe(
+                    d.birdY.toFloat(), velocity, gravity, horizon, delayMs
+                )
+                if (i == 0) entryY = y
+                minY = min(minY, y)
+                maxY = max(maxY, y)
+                minTop = min(minTop, y - birdHalfHeight)
+                maxBottom = max(maxBottom, y + birdHalfHeight)
+                val miss = missAtCenter(y)
+                worstMiss = max(worstMiss, miss)
+                missSum += miss
+                val naturalY = d.birdY + velocity * horizon + 0.5f * gravity * horizon * horizon
+                val naturalSide = collisionSide(naturalY)
+                val candidateSide = collisionSide(y)
+                if ((naturalSide < 0 && candidateSide > 0) ||
+                    (naturalSide > 0 && candidateSide < 0)) {
+                    oppositeCollision = true
                 }
-                .minByOrNull { it.score }
-        } else null
-        val bestPlan = bestSafePlan ?: bestRescuePlan
-        val bestPlanCount = bestPlan?.tapTimesMs?.size ?: 0
-        val bestPlanScore = bestPlan?.score ?: waitActionMiss
-        val bestPlanMiss = bestPlan?.worstMiss ?: waitActionMiss
-        val bestPlanEntryY = bestPlan?.entryY ?: zeroEntryY
-        val bestPlanMiddleY = bestPlan?.middleY ?: zeroMiddleY
-        val bestPlanExitY = bestPlan?.exitY ?: zeroExitY
-        val selectedTapTimes = bestPlan?.tapTimesMs ?: floatArrayOf()
-        val selectedIntervals = selectedTapTimes.indices.map { i ->
-            if (i == 0) selectedTapTimes[i] else selectedTapTimes[i] - selectedTapTimes[i - 1]
+            }
+            val meanMiss = missSum / sampleTimes.size.toFloat()
+            candidatesEvaluated++
+            if (worstMiss <= 0f) {
+                // Among fully safe single-tap solutions choose the latest response time.
+                if (delayMs > bestSafeDelay) {
+                    bestSafeDelay = delayMs
+                    bestSafeEntryY = entryY
+                    bestSafeMinY = minY
+                    bestSafeMaxY = maxY
+                    bestSafeMinTop = minTop
+                    bestSafeMaxBottom = maxBottom
+                }
+            } else if (!oppositeCollision && worstMiss + minUsefulImprovement < waitWorstMiss) {
+                val improvesBest = worstMiss < bestRescueMiss - 0.5f ||
+                    (abs(worstMiss - bestRescueMiss) <= 0.5f && delayMs > bestRescueDelay)
+                if (improvesBest) {
+                    bestRescueDelay = delayMs
+                    bestRescueMiss = worstMiss
+                    bestRescueMeanMiss = meanMiss
+                    bestRescueEntryY = entryY
+                    bestRescueMinY = minY
+                    bestRescueMaxY = maxY
+                    bestRescueMinTop = minTop
+                    bestRescueMaxBottom = maxBottom
+                }
+            }
         }
-        val firstTapDelay = selectedTapTimes.firstOrNull() ?: 0f
-        val scheduleText = if (selectedIntervals.isEmpty()) "NONE"
-            else selectedIntervals.joinToString(",") { it.toInt().toString() }
-        val scenarioText = (1..4).joinToString(" ") { count ->
-            val p = bestByTapCount[count]
-            if (p == null) "$count=NA" else "$count:${p.worstMiss.toInt()}@[${p.tapTimesMs.joinToString(",") { it.toInt().toString() }}]"
+
+        val searchWindowExists = safeWindowValid && distanceWindow && gapTrusted &&
+            waitWorstMiss > missThreshold && maxResponseDelay >= minResponseDelay
+        if (searchWindowExists) {
+            var candidateDelay = minResponseDelay
+            while (candidateDelay <= maxResponseDelay + 0.1f) {
+                evaluateInterceptDelay(candidateDelay)
+                candidateDelay += 20f
+            }
+            // Include the exact end of the pre-contact window between grid points.
+            evaluateInterceptDelay(maxResponseDelay)
+            // Preserve an already scheduled response time if it remains inside the valid window.
+            if (pendingPipeTapAt > now && pendingPipeTapTrackId == activePipeTrackId) {
+                evaluateInterceptDelay((pendingPipeTapAt - now).toFloat())
+            }
         }
-        val safetyMissThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
-        val recoveryPossible = bestPlan != null
-        val planFullySafe = bestSafePlan != null
-        val gapTrusted = d.pipeConfidence >= MIN_GAP_CONFIDENCE_FOR_CONTROL &&
-            gapHeight >= fieldHeight * 0.08f && gapHeight <= fieldHeight * 0.62f
-        val tapDispatchWindow = reactionMs + 45f
-        val planningConditionsValid = distanceWindow && safeWindowValid && gapTrusted &&
-            !tapFeedbackPending && waitActionMiss > safetyMissThreshold && recoveryPossible
-        val pendingPlanMatchesSelection = pendingResponseDelay != null &&
-            abs(firstTapDelay - pendingResponseDelay) <= 12f
-        if (!planningConditionsValid && pendingPipeTapAt > 0L) {
-            appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PLAN_NO_LONGER_VALID trackId=$pendingPipeTapTrackId")
+
+        val useSafePlan = bestSafeDelay >= 0f
+        val selectedDelay = if (useSafePlan) bestSafeDelay else bestRescueDelay
+        val selectedExists = selectedDelay >= 0f
+        val selectedMiss = if (useSafePlan) 0f else bestRescueMiss
+        val selectedEntryY = if (useSafePlan) bestSafeEntryY else bestRescueEntryY
+        val selectedMinY = if (useSafePlan) bestSafeMinY else bestRescueMinY
+        val selectedMaxY = if (useSafePlan) bestSafeMaxY else bestRescueMaxY
+        val selectedMinTop = if (useSafePlan) bestSafeMinTop else bestRescueMinTop
+        val selectedMaxBottom = if (useSafePlan) bestSafeMaxBottom else bestRescueMaxBottom
+        val selectedMeanMiss = if (useSafePlan) 0f else bestRescueMeanMiss
+        val planMode = when {
+            useSafePlan -> "FULL_SAFE_ONE_TAP"
+            selectedExists -> "SAME_SIDE_RESCUE_ONE_TAP"
+            else -> "NO_SAFE_INTERCEPT"
+        }
+        val planValid = searchWindowExists && selectedExists
+        val tapDispatchWindow = reactionMs + 30f
+        val canDispatchTap = !tapFeedbackPending && !hadTapFeedback &&
+            tapSpacingReady && !gestureInFlight.get()
+        val shouldTap = planValid && selectedDelay <= tapDispatchWindow && canDispatchTap
+
+        if (!planValid && pendingPipeTapAt > 0L &&
+            pendingPipeTapTrackId == activePipeTrackId) {
+            appendRunLog(
+                "PIPE_TAP_PLAN_CANCEL reason=INTERCEPT_NO_LONGER_VALID trackId=$activePipeTrackId"
+            )
             pendingPipeTapAt = 0L
             pendingPipeTapTrackId = -1
-        } else if (planningConditionsValid && firstTapDelay > tapDispatchWindow &&
-            !pendingPlanMatchesSelection) {
-            pendingPipeTapAt = now + firstTapDelay.toLong()
-            pendingPipeTapTrackId = activePipeTrackId
-            appendRunLog(
-                "PIPE_TAP_PLAN_SCHEDULED trackId=$activePipeTrackId " +
-                    "responseIn=${firstTapDelay.toInt()}ms dispatchIn=${(firstTapDelay - reactionMs).toInt()}ms " +
-                    "planN=$bestPlanCount miss=${bestPlanMiss.toInt()}"
-            )
+        } else if (planValid && selectedDelay > tapDispatchWindow) {
+            val newTargetAt = now + selectedDelay.toLong()
+            if (pendingPipeTapAt == 0L || pendingPipeTapTrackId != activePipeTrackId ||
+                abs((pendingPipeTapAt - newTargetAt).toFloat()) > 35f) {
+                pendingPipeTapAt = newTargetAt
+                pendingPipeTapTrackId = activePipeTrackId
+                appendRunLog(
+                    "PIPE_TAP_PLAN_SCHEDULED source=COLLISION_INTERCEPT trackId=$activePipeTrackId " +
+                        "responseIn=${selectedDelay.toInt()}ms dispatchIn=${(selectedDelay - reactionMs).toInt()}ms " +
+                        "mode=$planMode miss=${selectedMiss.toInt()}"
+                )
+            }
         }
-        val tapWindowReady = firstTapDelay <= tapDispatchWindow
-        val plannerShouldTap = planningConditionsValid && tapWindowReady &&
-            !hadTapFeedback && tapSpacingReady
 
-        val actionCandidatesText = "WAIT:${waitActionMiss.toInt()} " +
-            "FLAP_SAFE:${bestSafePlan?.let { it.worstMiss.toInt() } ?: "NA"} " +
-            "FLAP_RESCUE:${bestRescuePlan?.let { it.worstMiss.toInt() } ?: "NA"}"
-        val stateKey = encodeQLearningState(velocity, timeToPipe, targetY - d.birdY, gapHeight, fieldHeight)
-        val fallbackAction = if (plannerShouldTap) RL_FLAP else RL_WAIT
-        // Q is allowed to choose only when WAIT and the best FLAP schedule both clear
-        // entry, middle and exit with zero predicted collision miss.
-        val bothActionsSafe = zeroWorstMiss <= 0f && bestSafePlan != null
-        val qCanChoose = bothActionsSafe && gapTrusted && distanceWindow && safeWindowValid &&
-            !tapFeedbackPending && !hadTapFeedback && tapSpacingReady &&
-            !gestureInFlight.get() && tapWindowReady
-        val qExploreWasTried = qLearningTable[stateKey]?.safeExploreTried ?: false
-        val qAction = qLearningChoice(stateKey, fallbackAction, qCanChoose)
-        val qEntry = qLearningTable[stateKey]
-        val qExplorationTriggered = qCanChoose && !qExploreWasTried &&
-            qEntry?.let { it.safeExploreTried && it.visits[RL_FLAP] == 0 } == true
-        val qOverridesFallback = qCanChoose && qAction != fallbackAction
-        val qPolicyMode = when {
-            !qCanChoose -> "RULE_GUARDED"
-            qExplorationTriggered -> "SAFE_EXPLORATION"
-            qOverridesFallback -> "LEARNED_OVERRIDE"
-            else -> "Q_AGREES_OR_WARMUP"
-        }
-        val shouldTap = if (qCanChoose) qAction == RL_FLAP else plannerShouldTap
-        val qFlap = qEntry?.values?.get(RL_FLAP) ?: 0f
-        val qWait = qEntry?.values?.get(RL_WAIT) ?: 0f
-        val qFlapVisits = qEntry?.visits?.get(RL_FLAP) ?: 0
-        val qWaitVisits = qEntry?.visits?.get(RL_WAIT) ?: 0
+        val predictedEntryY = if (selectedExists) selectedEntryY else waitEntryY
+        lastInterceptPredictionTrackId = activePipeTrackId
+        lastInterceptPredictedY = predictedEntryY
+        lastInterceptPredictionAt = now + timeToPipe.toLong()
 
-        val wait100 = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, min(100f, timeToPipe), floatArrayOf())
-        val wait200 = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, min(200f, timeToPipe), floatArrayOf())
-        val wait300 = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, min(300f, timeToPipe), floatArrayOf())
-        val wait400 = predictTrajectoryAtPipe(d.birdY.toFloat(), velocity, gravity, min(400f, timeToPipe), floatArrayOf())
+        val stateKey = encodeQLearningState(
+            velocity, timeToPipe, (gapTop + gapHeight * 0.5f) - d.birdY, gapHeight, fieldHeight
+        )
+        val actionCandidatesText = "WAIT:${waitWorstMiss.toInt()} " +
+            "ONE_TAP_SAFE:${if (bestSafeDelay >= 0f) "0@${bestSafeDelay.toInt()}ms" else "NA"} " +
+            "ONE_TAP_RESCUE:${if (bestRescueDelay >= 0f) "${bestRescueMiss.toInt()}@${bestRescueDelay.toInt()}ms" else "NA"}"
         val decisionReason = when {
             !distanceWindow -> "OUT_OF_RANGE"
             !safeWindowValid -> "INVALID_SAFE_WINDOW"
             !gapTrusted -> "LOW_GAP_CONFIDENCE_WAIT"
+            waitWorstMiss <= missThreshold -> "PREDICTED_COLLISION_PATH_SAFE_WAIT"
+            maxResponseDelay < minResponseDelay -> "NO_PRECONTACT_TAP_WINDOW"
             tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
-            waitActionMiss <= safetyMissThreshold -> "PATH_SAFE_WAIT"
             hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
             !tapSpacingReady -> "WAIT_MIN_TAP_INTERVAL"
-            recoveryPossible && !tapWindowReady -> "WAIT_PLANNED_TAP_${firstTapDelay.toInt()}MS"
-            planFullySafe && bestPlanCount >= 3 -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAPS"
-            planFullySafe -> "RECOVERY_SAFE_PLAN_${bestPlanCount}_TAP"
-            bestRescuePlan != null && bestPlanCount >= 3 -> "RECOVERY_SAME_SIDE_PLAN_${bestPlanCount}_TAPS"
-            bestRescuePlan != null -> "RECOVERY_SAME_SIDE_PLAN_${bestPlanCount}_TAP"
-            else -> "WAIT_NO_NONWORSENING_PLAN"
+            !selectedExists -> "NO_SAFE_SINGLE_TAP_INTERCEPT"
+            selectedDelay > tapDispatchWindow -> "WAIT_PLANNED_INTERCEPT_${selectedDelay.toInt()}MS"
+            gestureInFlight.get() -> "WAIT_GESTURE_IN_FLIGHT"
+            else -> "COLLISION_INTERCEPT_READY"
         }
-        val finalDecisionReason = if (qOverridesFallback) "Q_SAFE_FLAP_OVERRIDE" else decisionReason
-        attemptLastDecision = finalDecisionReason
-        if (shouldTap) attemptFlapDecisions++ else attemptWaitDecisions++
+        attemptLastDecision = decisionReason
         appendRunLog(
-            "FRAME bird=${d.birdY} box=${d.birdBounds} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)}" +
-                " pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} score=${fmt(d.pipeConfidence)}" +
-                " gapTrusted=$gapTrusted safeMargin=${safeMargin.toInt()} gap=${gapTop.toInt()}..${gapBottom.toInt()}" +
-                " dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} overlap=${collisionDuration.toInt()}ms" +
-                " wait100=${wait100.toInt()} wait200=${wait200.toInt()} wait300=${wait300.toInt()} wait400=${wait400.toInt()}" +
-                " zeroEntry/Mid/Exit=${zeroEntryY.toInt()}/${zeroMiddleY.toInt()}/${zeroExitY.toInt()}" +
-                " planN=$bestPlanCount firstDelay=${firstTapDelay.toInt()}ms intervals=$scheduleText" +
-                " planEntry/Mid/Exit=${bestPlanEntryY.toInt()}/${bestPlanMiddleY.toInt()}/${bestPlanExitY.toInt()}" +
-                " miss0/plan=${zeroWorstMiss.toInt()}/${bestPlanMiss.toInt()}" +
-                " actionCandidates={$actionCandidatesText} selected=${if (shouldTap) "FLAP" else "WAIT"} " +
-                " planSafety=${if (planFullySafe) "FULL" else if (bestRescuePlan != null) "SAME_SIDE_RESCUE" else "NONE"}" +
-                " safe=${safeTop.toInt()}..${safeBottom.toInt()} flapV=${fmt(estimatedFlapVelocity)}" +
-                " candidates={$scenarioText} schedules=$schedulesEvaluated elapsedSinceImpulse=${if (lastAutoTapAt > 0L) elapsedSinceLastImpulse.toInt() else -1}ms" +
-                " nextImpulseDelay=${firstTapDelay.toInt()}ms intervalReady=$tapWindowReady " +
-                "pendingTapIn=${if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L}ms " +
+            "COLLISION_INTERCEPT trackId=$activePipeTrackId pipeLeft=$pipeLeftEdgeForPlan " +
+                "birdRight=$birdRightEdgeForPlan closingSpeed=${fmt(obstacleSpeed)}pxPerMs " +
+                "tCross=${timeToPipe.toInt()}ms overlap=${collisionDuration.toInt()}ms " +
+                "birdY=${d.birdY} v=${fmt(velocity)} g=${fmt(gravity)} flapV=${fmt(estimatedFlapVelocity)} " +
+                "waitY=${waitEntryY.toInt()} range=${waitMinY.toInt()}..${waitMaxY.toInt()} " +
+                "waitTopBottom=${waitMinTop.toInt()}..${waitMaxBottom.toInt()} " +
+                "gap=${gapTop.toInt()}..${gapBottom.toInt()} safeCenter=${safeTop.toInt()}..${safeBottom.toInt()} " +
+                "margin=${safeMargin.toInt()} confidence=${fmt(d.pipeConfidence)} " +
+                "candidateDelay=${if (selectedExists) selectedDelay.toInt() else -1}ms " +
+                "candidateY=${if (selectedExists) selectedEntryY.toInt() else -1} " +
+                "candidateRange=${if (selectedExists) "${selectedMinY.toInt()}..${selectedMaxY.toInt()}" else "NONE"} " +
+                "candidateTopBottom=${if (selectedExists) "${selectedMinTop.toInt()}..${selectedMaxBottom.toInt()}" else "NONE"} " +
+                "candidateMiss=${selectedMiss.toInt()} meanMiss=${selectedMeanMiss.toInt()} " +
+                "candidates=$candidatesEvaluated actions={$actionCandidatesText} " +
+                "selected=${if (shouldTap) "FLAP" else "WAIT"} mode=$planMode " +
                 "feedbackPending=$tapFeedbackPending feedbackResolved=$hadTapFeedback " +
-                "tapSpacingReady=$tapSpacingReady feedbackAge=${if (lastTapFeedbackAt > 0L) now - lastTapFeedbackAt else -1L}ms" +
-                " fallback=${if (fallbackAction == RL_FLAP) "FLAP" else "WAIT"}" +
-                " q=${fmt(qFlap)}/${fmt(qWait)} visits=$qFlapVisits/$qWaitVisits qAction=${if (qAction == RL_FLAP) "FLAP" else "WAIT"}" +
-                " qPolicy=$qPolicyMode qOverride=$qOverridesFallback bothSafe=$bothActionsSafe " +
-                " rescueBudget=$sameSideRescueTapCount/$MAX_RESCUE_TAPS_PER_PIPE " +
-                " recoveryPossible=$recoveryPossible predictedCollision=${zeroWorstMiss > 0f} " +
-                " gestureBusy=${gestureInFlight.get()} pipePassed=$pipePassed decision=$finalDecisionReason"
+                "spacingReady=$tapSpacingReady pendingTapIn=${if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L}ms " +
+                "reason=$decisionReason"
         )
+
         var actualAction = RL_WAIT
-        if (shouldTap) {
-            screenStatus = "КОРРЕКЦИЯ • план $bestPlanCount тап(ов) • интервалы $scheduleText • окно " +
-                safeTop.toInt() + ".." + safeBottom.toInt()
-            if (tap(tapX, tapY, "AUTO", velocity, d.birdY)) {
-                actualAction = RL_FLAP
-                if (bestRescuePlan != null) sameSideRescueTapCount++
-                lastAutoTapAt = now
-                val scheduledResponseIn = if (pendingPipeTapAt > 0L &&
-                    pendingPipeTapTrackId == activePipeTrackId) (pendingPipeTapAt - now).coerceAtLeast(0L) else -1L
-                pendingPipeTapAt = 0L
-                pendingPipeTapTrackId = -1
-                autoTapCount++
-                attemptAutoTaps++
-                attemptLastAction = "FLAP_REQUESTED"
-                appendRunLog(
-                    "ACTION auto_tap accepted id=$lastTapRequestId count=$autoTapCount " +
-                        "plan=$bestPlanCount firstDelay=${firstTapDelay.toInt()}ms " +
-                        "scheduledResponseIn=${scheduledResponseIn}ms intervals=$scheduleText"
-                )
-            } else {
-                attemptLastAction = "FLAP_REJECTED"
-                appendRunLog("ACTION auto_tap rejected reason=see_TAP_REJECTED_EVENT")
-            }
+        if (shouldTap && tap(tapX, tapY, "COLLISION_INTERCEPT", velocity, d.birdY)) {
+            actualAction = RL_FLAP
+            lastAutoTapAt = now
+            pendingPipeTapAt = 0L
+            pendingPipeTapTrackId = -1
+            autoTapCount++
+            attemptAutoTaps++
+            attemptFlapDecisions++
+            if (!useSafePlan) sameSideRescueTapCount++
+            attemptLastAction = "FLAP_COLLISION_INTERCEPT"
+            attemptLastDecision = if (useSafePlan)
+                "COLLISION_INTERCEPT_SAFE_ONE_TAP" else "COLLISION_INTERCEPT_RESCUE_ONE_TAP"
+            appendRunLog(
+                "ACTION_SPACE selected=FLAP reason=$attemptLastDecision " +
+                    "responseDelay=${selectedDelay.toInt()}ms nextTapOnly=true replanAfterPhysicsFeedback=true"
+            )
+            screenStatus = "ПЕРЕХВАТ ТРУБЫ • тап по расчёту через ${selectedDelay.toInt()}мс"
         } else {
-            attemptLastAction = if (tapFeedbackPending) "WAIT_FEEDBACK" else "WAIT"
-            val phase = when { velocity < -0.02f -> "ПОДЪЁМ"; velocity > 0.02f -> "ПАДЕНИЕ"; else -> "ВЕРШИНА ДУГИ" }
-            screenStatus = phase + " • y=" + d.birdY + " • v=" + fmt(velocity) + " • t=" + timeToPipe.toInt() +
-                "мс • прогноз=" + zeroEntryY.toInt() + " • окно=" + safeTop.toInt() + ".." + safeBottom.toInt()
+            attemptWaitDecisions++
+            attemptLastAction = "WAIT_COLLISION_INTERCEPT"
+            val reason = when {
+                tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
+                hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
+                !tapSpacingReady -> "MIN_TAP_INTERVAL"
+                gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
+                !distanceWindow -> "OUT_OF_RANGE"
+                !gapTrusted -> "LOW_GAP_CONFIDENCE"
+                waitWorstMiss <= missThreshold -> "PREDICTED_PATH_SAFE"
+                maxResponseDelay < minResponseDelay -> "NO_PRECONTACT_WINDOW"
+                !selectedExists -> "NO_SAFE_SINGLE_TAP_INTERCEPT"
+                selectedDelay > tapDispatchWindow -> "PLANNED_TAP_IN_${selectedDelay.toInt()}MS"
+                else -> "TAP_NOT_DISPATCHED"
+            }
+            appendRunLog("ACTION_SPACE selected=WAIT reason=$reason planMode=$planMode")
+            screenStatus = when {
+                waitWorstMiss <= missThreshold -> "ТРУБА • траектория проходит в просвет"
+                selectedExists && selectedDelay > tapDispatchWindow ->
+                    "ПОДВОД К ПРОСВЕТУ • тап через ${selectedDelay.toInt()}мс"
+                else -> "ПРОГНОЗ ТРУБЫ • $reason"
+            }
         }
         observeQLearningDecision(stateKey, actualAction, now, pipePassed)
     }
