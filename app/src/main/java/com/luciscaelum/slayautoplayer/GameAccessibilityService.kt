@@ -2339,7 +2339,8 @@ class GameAccessibilityService : AccessibilityService() {
         private const val RL_REWARD_SCHEMA = 3
         private const val RL_MAX_Q_STATES = 5000
         private const val RL_MAX_EPISODE_TRANSITIONS = 1800
-        private const val RL_MIN_ACTION_VISITS = 2
+        // One safely explored FLAP gives the first actionable comparison; later policy choices keep updating it.
+        private const val RL_MIN_ACTION_VISITS = 1
         private const val RL_Q_DECISION_MARGIN = 0.20f
         private const val RL_DISCOUNT = 0.92f
         private const val RL_LEARNING_RATE = 0.22f
