@@ -1551,7 +1551,6 @@ class GameAccessibilityService : AccessibilityService() {
                         hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
                         !tapSpacingReady -> "MIN_TAP_INTERVAL"
                         gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
-                        !tapSpacingReady -> "INTERTAP_SPACING"
                         !cruiseNeedsLift -> "TRAJECTORY_IN_BAND_OR_RISING"
                         !tapKeepsInField -> "TAP_WOULD_OVERSHOOT"
                         else -> "TAP_NOT_USEFUL"
