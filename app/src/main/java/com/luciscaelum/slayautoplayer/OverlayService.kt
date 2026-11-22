@@ -2,8 +2,6 @@ package com.luciscaelum.slayautoplayer
 
 import android.app.Service
 import android.content.Intent
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
@@ -94,11 +92,8 @@ class OverlayService : Service() {
             GameAccessibilityService.togglePause()
             refresh()
         }
-        button("СКОПИРОВАТЬ ЛОГ") {
-            val log = GameAccessibilityService.getRunLog()
-            val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            clipboard.setPrimaryClip(ClipData.newPlainText("Bird Play run log", log))
-            Toast.makeText(this, "Лог скопирован • ${log.length} символов", Toast.LENGTH_SHORT).show()
+        button("ЖУРНАЛ В ПРИЛОЖЕНИИ") {
+            startActivity(Intent(this, LogActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
         button("РУЧНОЙ") {
             GameAccessibilityService.manualTakeover()

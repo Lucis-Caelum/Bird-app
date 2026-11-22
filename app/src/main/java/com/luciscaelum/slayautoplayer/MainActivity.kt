@@ -28,7 +28,7 @@ class MainActivity : Activity() {
         }
 
         content.addView(TextView(this).apply {
-            text = "Bird Play 0.13.0"
+            text = "Bird Play 0.36.0"
             textSize = 26f
         })
 
@@ -82,6 +82,10 @@ class MainActivity : Activity() {
                     Toast.makeText(this, "Не удалось запустить панель: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
+        }
+
+        addButton("5. Журнал игровых попыток") {
+            startActivity(Intent(this, LogActivity::class.java))
         }
 
         addButton("Остановить панель") {

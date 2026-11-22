@@ -2,6 +2,7 @@ package com.luciscaelum.slayautoplayer
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Path
 import kotlin.math.abs
@@ -16,6 +17,8 @@ import android.view.Display
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.widget.Toast
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import org.json.JSONArray
@@ -74,8 +77,10 @@ class GameAccessibilityService : AccessibilityService() {
     )
     private val runLogLock = Any()
     private val runLog = ArrayDeque<String>()
+    private val pendingRunLogLines = ArrayList<String>(64)
     private var runStartedAt = 0L
     private var attemptCount = 0
+    private var runLogStorageError: String? = null
     private data class QEntry(val values: FloatArray = FloatArray(2), val visits: IntArray = IntArray(2), var safeExploreTried: Boolean = false)
     private data class QTransition(val state: String, val action: Int, val reward: Float, val nextState: String?)
     private val qLearningTable = LinkedHashMap<String, QEntry>()
@@ -222,6 +227,7 @@ class GameAccessibilityService : AccessibilityService() {
                     screenshotIntervalMs = 650L
                     val detection = detectPlayfield(field)
                     if (detection.activeGame && !wasActiveGame) {
+                        recordAttemptStart(detection)
                         previousBirdY = -1
                         previousBirdX = -1
                         baselineBirdWidth = -1f
@@ -232,6 +238,7 @@ class GameAccessibilityService : AccessibilityService() {
                         seedBirdSizeBaseline(detection, "NEW_GAME_CAPTURE")
                         screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
                     } else if (!detection.activeGame && wasActiveGame) {
+                        recordAttemptEnd("GAME_OVER_OR_SCENE_LOST")
                         previousBirdY = -1
                         previousBirdX = -1
                         baselineBirdWidth = -1f
@@ -302,15 +309,15 @@ class GameAccessibilityService : AccessibilityService() {
             synchronized(tapObservationLock) { pendingTapObservation = null }
             autoTapCount = 0
             manualTapCount = 0
-            attemptCount++
+            recordAttemptStart(detection)
             resetAttemptDiagnostics()
-            appendRunLog("=== НАЧАЛО ПОПЫТКИ #$attemptCount ===")
             seedBirdSizeBaseline(detection, "NEW_GAME_FRAME")
             screenStatus = "ИГРА НАЧАЛАСЬ • MediaProjection"
         } else if (!detection.activeGame && wasActiveGame) {
             appendRunLog("=== КОНЕЦ ПОПЫТКИ #$attemptCount ===")
             finishQLearningAttempt(true)
             finishAttemptDiagnostics("GAME_OVER_OR_SCENE_LOST")
+            recordAttemptEnd("GAME_OVER_OR_SCENE_LOST")
             previousBirdY = -1
             previousBirdX = -1
             baselineBirdWidth = -1f
@@ -1638,10 +1645,11 @@ class GameAccessibilityService : AccessibilityService() {
         manual = false
         paused = false
         monitoring = true
-        synchronized(runLogLock) { runLog.clear() }
+        clearRunLogForNewSession()
         runStartedAt = SystemClock.elapsedRealtime()
         attemptCount = 0
         appendRunLog("=== СЕССИЯ МОНИТОРИНГА ===")
+        appendRunLog("SESSION_START id=${System.currentTimeMillis()} format=2")
         appendRunLog("RL_TABLE_SESSION status=" + qLearningMetaStatus + " revision=" +
             qLearningRevision + " states=" + qLearningTable.size + " updatedAt=" +
             qLearningUpdatedAt + " checksum=" + qLearningChecksum +
@@ -1684,6 +1692,10 @@ class GameAccessibilityService : AccessibilityService() {
     private fun stopMonitoring(reason: String = "Мониторинг остановлен") {
         finishQLearningAttempt(false)
         finishAttemptDiagnostics("STOPPED")
+        if (wasActiveGame && attemptCount > 0) recordAttemptEnd("INTERRUPTED:" + reason)
+        wasActiveGame = false
+        appendRunLog("SESSION_END attemptsStarted=" + attemptCount + " reason=" + reason)
+        flushRunLogToDisk()
         monitoring = false
         paused = true
         manual = true
@@ -1781,18 +1793,73 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun fmt(value: Float): String = String.format(java.util.Locale.US, "%.3f", value)
 
+    private fun runLogFile(): File = File(filesDir, RUN_LOG_FILE_NAME)
+
+    private fun clearRunLogForNewSession() {
+        synchronized(runLogLock) {
+            runLog.clear()
+            pendingRunLogLines.clear()
+            runLogStorageError = null
+            try {
+                runLogFile().writeText("", Charsets.UTF_8)
+            } catch (e: Exception) {
+                runLogStorageError = e.javaClass.simpleName
+            }
+        }
+    }
+
+    // Flush in small batches so frame-by-frame diagnostics do not cause a disk write per frame.
+    private fun flushPendingRunLogLocked() {
+        if (pendingRunLogLines.isEmpty()) return
+        try {
+            FileOutputStream(runLogFile(), true).bufferedWriter(Charsets.UTF_8).use { writer ->
+                for (line in pendingRunLogLines) writer.append(line).append('\n')
+            }
+            pendingRunLogLines.clear()
+            runLogStorageError = null
+        } catch (e: Exception) {
+            runLogStorageError = e.javaClass.simpleName
+        }
+    }
+
+    private fun flushRunLogToDisk() {
+        synchronized(runLogLock) { flushPendingRunLogLocked() }
+    }
+
     private fun appendRunLog(message: String) {
         val elapsed = if (runStartedAt > 0L) SystemClock.elapsedRealtime() - runStartedAt else 0L
         val line = "$elapsed ms | $message"
         synchronized(runLogLock) {
-            if (runLog.size >= 4000) runLog.removeFirst()
+            if (runLog.size >= MAX_RUN_LOG_LINES) runLog.removeFirst()
             runLog.addLast(line)
+            pendingRunLogLines.add(line)
+            if (pendingRunLogLines.size >= RUN_LOG_FLUSH_BATCH_SIZE) flushPendingRunLogLocked()
         }
     }
 
     private fun exportRunLog(): String = synchronized(runLogLock) {
-        if (runLog.isEmpty()) "Лог пока пуст. Запусти игру с включённым автопилотом."
-        else runLog.joinToString(separator = "\n")
+        flushPendingRunLogLocked()
+        try {
+            val file = runLogFile()
+            if (file.exists() && file.length() > 0L) file.readText(Charsets.UTF_8)
+            else if (runLog.isNotEmpty()) runLog.joinToString(separator = "\n")
+            else "Лог пока пуст. Включи автопилот и запусти игру."
+        } catch (e: Exception) {
+            runLog.joinToString(separator = "\n") + "\nLOG_READ_ERROR=" + e.javaClass.simpleName
+        }
+    }
+
+    private fun recordAttemptStart(detection: Detection) {
+        attemptCount++
+        appendRunLog("=== НАЧАЛО ПОПЫТКИ #" + attemptCount + " ===")
+        appendRunLog("PLAY_START_DETECTED attempt=" + attemptCount + " trigger=ACTIVE_GAME_TRANSITION scene=" + detection.message)
+        appendRunLog("ATTEMPT_START attempt=" + attemptCount + " source=GAMEPLAY_FRAME")
+        flushRunLogToDisk()
+    }
+
+    private fun recordAttemptEnd(reason: String) {
+        appendRunLog("ATTEMPT_END attempt=" + attemptCount + " result=" + reason + " passed=" + attemptPipePasses)
+        flushRunLogToDisk()
     }
 
     override fun onDestroy() {
@@ -1828,9 +1895,24 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var learnedChecksum = "EMPTY"
         const val RL_FLAP = 0
         const val RL_WAIT = 1
+        private const val MAX_RUN_LOG_LINES = 50000
+        private const val RUN_LOG_FLUSH_BATCH_SIZE = 64
+        private const val RUN_LOG_FILE_NAME = "bird-play-session.txt"
         @Volatile private var instance: GameAccessibilityService? = null
 
         fun getRunLog(): String = instance?.exportRunLog() ?: "Служба Bird Play не подключена."
+
+        fun getRunLog(context: Context): String {
+            val activeService = instance
+            if (activeService != null) return activeService.exportRunLog()
+            val file = File(context.applicationContext.filesDir, RUN_LOG_FILE_NAME)
+            return try {
+                if (file.exists() && file.length() > 0L) file.readText(Charsets.UTF_8)
+                else "Лог пока не создан. Включи автопилот и запусти игру."
+            } catch (e: Exception) {
+                "Не удалось прочитать журнал: " + e.javaClass.simpleName
+            }
+        }
 
         fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
             instance?.processCapturedFrame(field, cropTop, screenW, screenH)

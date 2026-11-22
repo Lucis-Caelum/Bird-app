@@ -9,6 +9,9 @@
         android:label="Bird Play"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity
+            android:name=".LogActivity"
+            android:exported="false" />
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>
