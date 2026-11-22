@@ -1677,8 +1677,6 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     private fun handleAutoControl(
-
-        private fun handleAutoControl(
         d: Detection, fieldWidth: Int, fieldHeight: Int, cropTop: Int, screenWidth: Int, screenHeight: Int
     ) {
         if (!monitoring || paused || manual) return
