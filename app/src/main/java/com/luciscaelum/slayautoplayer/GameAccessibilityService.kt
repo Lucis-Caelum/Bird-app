@@ -1454,7 +1454,7 @@ class GameAccessibilityService : AccessibilityService() {
                     "COLLISION_INTERCEPT_ACTUAL trackId=$activePipeTrackId " +
                         "predictedEntryY=${lastInterceptPredictedY.toInt()} actualY=${d.birdY} " +
                         "delta=${(d.birdY - lastInterceptPredictedY).toInt()}px " +
-                        "predictionAge=${if (lastInterceptPredictionAt > 0L) now - lastInterceptPredictionAt else -1L}ms"
+                        "timingError=${if (lastInterceptPredictionAt > 0L) now - lastInterceptPredictionAt else 0L}ms"
                 )
                 lastInterceptPredictionTrackId = -1
                 lastInterceptPredictedY = Float.NaN
@@ -1997,7 +1997,10 @@ class GameAccessibilityService : AccessibilityService() {
         }
 
         val useSafePlan = bestSafeDelay >= 0f
-        val selectedDelay = if (useSafePlan) bestSafeDelay else bestRescueDelay
+        val rescuePlanAvailable = bestRescueDelay >= 0f &&
+            sameSideRescueTapCount < MAX_RESCUE_TAPS_PER_PIPE
+        val selectedDelay = if (useSafePlan) bestSafeDelay
+            else if (rescuePlanAvailable) bestRescueDelay else -1f
         val selectedExists = selectedDelay >= 0f
         val selectedMiss = if (useSafePlan) 0f else bestRescueMiss
         val selectedEntryY = if (useSafePlan) bestSafeEntryY else bestRescueEntryY
@@ -2058,6 +2061,8 @@ class GameAccessibilityService : AccessibilityService() {
             tapFeedbackPending -> "WAIT_TAP_PHYSICS_FEEDBACK"
             hadTapFeedback -> "WAIT_NEXT_FRAME_AFTER_FEEDBACK"
             !tapSpacingReady -> "WAIT_MIN_TAP_INTERVAL"
+            !selectedExists && bestRescueDelay >= 0f &&
+                sameSideRescueTapCount >= MAX_RESCUE_TAPS_PER_PIPE -> "RESCUE_TAP_BUDGET_EXHAUSTED"
             !selectedExists -> "NO_SAFE_SINGLE_TAP_INTERCEPT"
             selectedDelay > tapDispatchWindow -> "WAIT_PLANNED_INTERCEPT_${selectedDelay.toInt()}MS"
             gestureInFlight.get() -> "WAIT_GESTURE_IN_FLIGHT"
