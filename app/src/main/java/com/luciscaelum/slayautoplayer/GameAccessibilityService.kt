@@ -380,15 +380,12 @@ class GameAccessibilityService : AccessibilityService() {
     )
 
     private fun seedBirdSizeBaseline(d: Detection, source: String) {
-        if (d.birdBounds == "NONE") {
+        val width = d.birdRight - d.birdLeft
+        val height = d.birdBottom - d.birdTop
+        if (d.birdLeft < 0 || d.birdTop < 0 || width <= 0 || height <= 0) {
             appendRunLog("BIRD_SCALE_BASELINE source=$source status=WAITING_FOR_BOUNDS")
             return
         }
-        val parts = d.birdBounds.split(",")
-        val x = parts.getOrNull(0)?.split("..")
-        val y = parts.getOrNull(1)?.split("..")
-        val width = if (x?.size == 2) (x[1].toIntOrNull() ?: 0) - (x[0].toIntOrNull() ?: 0) else 0
-        val height = if (y?.size == 2) (y[1].toIntOrNull() ?: 0) - (y[0].toIntOrNull() ?: 0) else 0
         if (width > 0 && height > 0) {
             baselineBirdWidth = width.toFloat()
             baselineBirdHeight = height.toFloat()
