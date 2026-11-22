@@ -2108,7 +2108,7 @@ class GameAccessibilityService : AccessibilityService() {
             floatArrayOf(timeToPipe * 0.20f, timeToPipe * 0.40f, timeToPipe * 0.60f, timeToPipe * 0.80f)
         else floatArrayOf()
         val corridorHeight = if (corridorActive)
-            min(previousPassedGapBottom - previousPassedGapTop, gapBottom - gapTop).toFloat()
+            min((previousPassedGapBottom - previousPassedGapTop).toFloat(), gapBottom - gapTop)
         else 0f
         val corridorMargin = max(fieldHeight * 0.012f, corridorHeight * 0.075f)
         fun corridorProgressAt(timeMs: Float): Float {
