@@ -342,7 +342,17 @@ class GameAccessibilityService : AccessibilityService() {
         screenStatus = "$screenStatus • CV ${lastDetectionMs}мс"
     }
 
-    private data class Detection(val birdX:Int=-1,val birdY:Int=-1,val obstacleX:Int=-1,val gapTop:Int=-1,val gapBottom:Int=-1,val activeGame:Boolean=false,val message:String,val birdBounds:String="NONE",val pipeBounds:String="NONE",val pipeRuns:String="NONE",val pipeConfidence:Float=0f,val birdScale:String="UNKNOWN")
+    private data class Detection(
+        val birdX: Int = -1, val birdY: Int = -1,
+        val obstacleX: Int = -1, val gapTop: Int = -1, val gapBottom: Int = -1,
+        val activeGame: Boolean = false, val message: String,
+        val birdBounds: String = "NONE", val pipeBounds: String = "NONE",
+        val birdLeft: Int = -1, val birdRight: Int = -1,
+        val birdTop: Int = -1, val birdBottom: Int = -1,
+        val pipeLeft: Int = -1, val pipeRight: Int = -1,
+        val pipeRuns: String = "NONE", val pipeConfidence: Float = 0f,
+        val birdScale: String = "UNKNOWN"
+    )
 
     private fun seedBirdSizeBaseline(d: Detection, source: String) {
         if (d.birdBounds == "NONE") {
@@ -363,12 +373,14 @@ class GameAccessibilityService : AccessibilityService() {
             appendRunLog("BIRD_SCALE_BASELINE source=$source status=INVALID_BOUNDS value=${d.birdBounds}")
         }
     }
-    private fun detectPlayfield(bitmap: Bitmap): Detection {
+    private fun detectPlayfield(bitmap: Bitmap, cropTop: Int = 0): Detection {
         val w = bitmap.width
-        val h = bitmap.height
+        val sourceTop = cropTop.coerceIn(0, bitmap.height - 1)
+        val h = bitmap.height - sourceTop
+        if (h <= 0) return Detection(message = "Пустая область игрового поля")
         val pixelCount = w * h
         if (detectorPixels.size < pixelCount) detectorPixels = IntArray(pixelCount)
-        bitmap.getPixels(detectorPixels, 0, w, 0, 0, w, h)
+        bitmap.getPixels(detectorPixels, 0, w, 0, sourceTop, w, h)
         val step = 3
         val sampleW = (w + step - 1) / step
         val sampleH = (h + step - 1) / step
@@ -430,6 +442,10 @@ class GameAccessibilityService : AccessibilityService() {
         val birdFound = normalBirdFound || reducedBirdFound
         val birdX = if (birdFound) rawBirdX else -1
         val birdY = if (birdFound) rawBirdY else -1
+        val birdLeft = if (birdFound) minBirdX else -1
+        val birdRight = if (birdFound) maxBirdX else -1
+        val birdTop = if (birdFound) minBirdY else -1
+        val birdBottom = if (birdFound) maxBirdY else -1
         val baselineKnown = baselineBirdWidth > 0f && baselineBirdHeight > 0f
         val visuallyShrunk = baselineKnown &&
             detectedBirdWidth < baselineBirdWidth * 0.72f &&
@@ -502,6 +518,7 @@ class GameAccessibilityService : AccessibilityService() {
                 message = if (birdFound) "ИГРА • персонаж x=$birdX y=$birdY • ожидаю трубы"
                 else "ИГРА • счёт распознан, ищу персонажа",
                 birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
+                birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
                 birdScale = birdScale
             )
         }
@@ -546,6 +563,8 @@ class GameAccessibilityService : AccessibilityService() {
                 message = "ТРУБА x=$pipeLeadingEdgeX • ищу верхнюю/нижнюю часть",
                 birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
                 pipeBounds = "${nearest.first}..${nearest.second}",
+                birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
+                pipeLeft = nearest.first, pipeRight = nearest.second,
                 pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
                 pipeConfidence = (0.22f + runs.size * 0.09f).coerceAtMost(0.52f),
                 birdScale = birdScale
@@ -569,6 +588,8 @@ class GameAccessibilityService : AccessibilityService() {
                 message = "ТРУБА x=$pipeLeadingEdgeX • просвет не подтверждён",
                 birdBounds = if (birdFound) "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY" else "NONE",
                 pipeBounds = "${nearest.first}..${nearest.second}",
+                birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
+                pipeLeft = nearest.first, pipeRight = nearest.second,
                 pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
                 pipeConfidence = 0.42f,
                 birdScale = birdScale
@@ -582,10 +603,17 @@ class GameAccessibilityService : AccessibilityService() {
         val gapShapeScore = (1f - kotlin.math.abs(largestGap.toFloat() / h - 0.32f) * 0.55f).coerceIn(0.45f, 1f)
         val pipeConfidence = (runShapeScore * gapShapeScore).coerceIn(0.25f, 0.92f)
         return Detection(
-            birdX, birdY, pipeLeadingEdgeX, gapTop, gapBottom, true,
-            "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeLeadingEdgeX • ПРОХОД $gapTop..$gapBottom",
+            birdX = birdX,
+            birdY = birdY,
+            obstacleX = pipeLeadingEdgeX,
+            gapTop = gapTop,
+            gapBottom = gapBottom,
+            activeGame = true,
+            message = "ПТИЦА x=$birdX y=$birdY • ТРУБА x=$pipeLeadingEdgeX • ПРОХОД $gapTop..$gapBottom",
             birdBounds = "$minBirdX..$maxBirdX,$minBirdY..$maxBirdY",
             pipeBounds = "${nearest.first}..${nearest.second}",
+            birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
+            pipeLeft = nearest.first, pipeRight = nearest.second,
             pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
             pipeConfidence = pipeConfidence,
             birdScale = birdScale
@@ -914,7 +942,7 @@ class GameAccessibilityService : AccessibilityService() {
             return false
         }
 
-        val currentRightX = d.pipeBounds.substringAfter("..").toIntOrNull() ?: currentX
+        val currentRightX = d.pipeRight.takeIf { it >= 0 } ?: currentX
         val oldX = lastTrackedPipeX
         val oldRightX = lastTrackedPipeRightX
         val previousWasNear = trackedPipeNearBird
