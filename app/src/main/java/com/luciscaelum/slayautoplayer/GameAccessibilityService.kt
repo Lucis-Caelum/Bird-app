@@ -1019,17 +1019,16 @@ class GameAccessibilityService : AccessibilityService() {
         }
         val observed = (rawVelocity - gravity * dt * 0.5f).coerceIn(-3.2f, 0.8f)
         val oldEstimate = estimatedFlapVelocity
-        // Do not treat a naturally rising bird as proof that the tap generated lift.
-        // Compare the measured response with the no-flap velocity extrapolated from
-        // the pre-tap state, then cap each calibration update to reject noisy outliers.
+        // Keep the no-flap response check, but trust a confirmed measured impulse.
+        // A tight artificial delta clamp was making the learned flap much weaker
+        // than the actual game response and causing unnecessary follow-up taps.
         val sampleMidpointElapsed = (now.toFloat() - dt * 0.5f - pending.requestedAt.toFloat()).coerceAtLeast(0f)
         val expectedWithoutFlap = pending.baselineVelocity + gravity * sampleMidpointElapsed
         val responseStrength = expectedWithoutFlap - observed
         val confirmed = observed in -3.0f..-0.08f &&
             responseStrength >= max(0.16f, abs(expectedWithoutFlap) * 0.18f)
         if (confirmed) {
-            val boundedObservation = observed.coerceIn(oldEstimate - 0.35f, oldEstimate + 0.35f)
-            estimatedFlapVelocity = (oldEstimate * 0.70f + boundedObservation * 0.30f)
+            estimatedFlapVelocity = (oldEstimate * 0.35f + observed * 0.65f)
                 .coerceIn(-3.0f, -0.08f)
             persistFlapCalibration("AUTO_TAP")
         }
@@ -1166,173 +1165,55 @@ class GameAccessibilityService : AccessibilityService() {
                 d.gapTop >= 0 && d.gapBottom > d.gapTop &&
                 pipeRightEdge >= birdRightEdge - fieldWidth * 0.02f
             if (pipeCrossingWithKnownGap) {
-                val crossingSafeTop = d.gapTop + (d.gapBottom - d.gapTop) * 0.18f
-                val crossingSafeBottom = d.gapBottom - (d.gapBottom - d.gapTop) * 0.18f
-                // Look beyond the immediate 180 ms window. A single flap may improve
-                // a lower-side miss without bringing the bird fully back into the gap.
-                // Search up to three taps; execute only the first, then re-plan from
-                // the measured post-tap trajectory to avoid an unchecked burst.
-                val crossingHorizon = 450f
-                val crossingCheckTimes = floatArrayOf(90f, 180f, 270f, 360f, 450f)
-                val crossingIntervals = floatArrayOf(160f, 240f, 320f)
+                val crossingGapHeight = (d.gapBottom - d.gapTop).toFloat()
+                val crossingSafeTop = d.gapTop + crossingGapHeight * 0.18f
+                val crossingSafeBottom = d.gapBottom - crossingGapHeight * 0.18f
+                val crossingHorizon = 180f
                 val crossingWithoutTap = predictTrajectoryAtPipe(
-                    d.birdY.toFloat(), velocity, gravity, 180f, floatArrayOf()
+                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf()
                 )
                 val crossingWithTap = predictTrajectoryAtPipe(
-                    d.birdY.toFloat(), velocity, gravity, 180f, floatArrayOf(65f)
+                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf(65f)
                 )
-                fun crossingMiss(y: Float): Float = when {
-                    y < crossingSafeTop -> crossingSafeTop - y
-                    y > crossingSafeBottom -> y - crossingSafeBottom
-                    else -> 0f
-                }
-                fun crossingSide(y: Float): Int = when {
-                    y < crossingSafeTop -> -1
-                    y > crossingSafeBottom -> 1
-                    else -> 0
-                }
-                val crossingWaitYs = FloatArray(crossingCheckTimes.size) { index ->
-                    predictTrajectoryAtPipe(
-                        d.birdY.toFloat(), velocity, gravity, crossingCheckTimes[index], floatArrayOf()
-                    )
-                }
-                val crossingWaitMisses = FloatArray(crossingWaitYs.size) { crossingMiss(crossingWaitYs[it]) }
-                val crossingWaitWorstMiss = crossingWaitMisses.maxOrNull() ?: 0f
-                val crossingNeedsCorrection = crossingWaitWorstMiss > 0f
-                val crossingLowSideEmergency = velocity > 0.18f &&
-                    crossingWaitYs.any { it > crossingSafeBottom } &&
-                    crossingWaitWorstMiss > max(8f, fieldHeight * 0.012f)
-
-                var crossingBestSafeTimes: FloatArray? = null
-                var crossingBestSafeScore = Float.POSITIVE_INFINITY
-                var crossingBestRescueTimes: FloatArray? = null
-                var crossingBestRescueScore = Float.POSITIVE_INFINITY
-                var crossingBestRescueMiss = Float.POSITIVE_INFINITY
-                val crossingMinImprovement = max(8f, fieldHeight * 0.012f)
-                val crossingNoWorseTolerance = max(5f, fieldHeight * 0.008f)
-
-                fun evaluateCrossingSchedule(schedule: List<Float>) {
-                    if (schedule.isEmpty() || schedule.size > 3 ||
-                        schedule.last() + 35f >= crossingHorizon) return
-                    val taps = schedule.toFloatArray()
-                    val candidateYs = FloatArray(crossingCheckTimes.size) { index ->
-                        predictTrajectoryAtPipe(
-                            d.birdY.toFloat(), velocity, gravity, crossingCheckTimes[index], taps
-                        )
-                    }
-                    val candidateMisses = FloatArray(candidateYs.size) { crossingMiss(candidateYs[it]) }
-                    val worstMiss = candidateMisses.maxOrNull() ?: 0f
-                    val meanMiss = candidateMisses.average().toFloat()
-                    val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f -
-                        min(schedule.first(), 220f) * 0.025f
-
-                    if (worstMiss <= 0f) {
-                        if (score < crossingBestSafeScore) {
-                            crossingBestSafeScore = score
-                            crossingBestSafeTimes = taps
-                        }
-                        return
-                    }
-
-                    val doesNotReverseIntoOppositeSide = candidateYs.indices.all { index ->
-                        val naturalSide = crossingSide(crossingWaitYs[index])
-                        val candidateSide = crossingSide(candidateYs[index])
-                        when (naturalSide) {
-                            0 -> candidateSide == 0
-                            -1 -> candidateSide != 1
-                            else -> candidateSide != -1
-                        }
-                    }
-                    val doesNotMakeAnyPointMateriallyWorse = candidateMisses.indices.all { index ->
-                        candidateMisses[index] <= crossingWaitMisses[index] + crossingNoWorseTolerance
-                    }
-                    val improvesOverall = worstMiss + crossingMinImprovement < crossingWaitWorstMiss
-                    if (crossingLowSideEmergency && doesNotReverseIntoOppositeSide &&
-                        doesNotMakeAnyPointMateriallyWorse && improvesOverall &&
-                        score < crossingBestRescueScore) {
-                        crossingBestRescueScore = score
-                        crossingBestRescueMiss = worstMiss
-                        crossingBestRescueTimes = taps
-                    }
-                }
-
-                fun expandCrossingSchedules(schedule: MutableList<Float>) {
-                    evaluateCrossingSchedule(schedule)
-                    if (schedule.size >= 3) return
-                    val previousAt = schedule.last()
-                    for (interval in crossingIntervals) {
-                        val nextAt = previousAt + interval
-                        if (nextAt + 35f >= crossingHorizon) continue
-                        schedule.add(nextAt)
-                        expandCrossingSchedules(schedule)
-                        schedule.removeAt(schedule.lastIndex)
-                    }
-                }
-                expandCrossingSchedules(mutableListOf(65f))
-
-                val selectedCrossingTimes = crossingBestSafeTimes ?: crossingBestRescueTimes ?: floatArrayOf()
-                val crossingEmergencySelected = crossingBestSafeTimes == null && crossingBestRescueTimes != null
-                val selectedCrossingWorstMiss = when {
-                    crossingBestSafeTimes != null -> 0f
-                    crossingBestRescueTimes != null -> crossingBestRescueMiss
-                    else -> crossingWaitWorstMiss
-                }
-                val crossingTapImproves = selectedCrossingTimes.isNotEmpty() &&
-                    selectedCrossingWorstMiss + 1f < crossingWaitWorstMiss
-                val crossingIntervalsText = if (selectedCrossingTimes.isEmpty()) "NONE"
-                    else selectedCrossingTimes.indices.joinToString(",") { index ->
-                        if (index == 0) selectedCrossingTimes[index].toInt().toString()
-                        else (selectedCrossingTimes[index] - selectedCrossingTimes[index - 1]).toInt().toString()
-                    }
+                val crossingNeedsCorrection = crossingWithoutTap < crossingSafeTop ||
+                    crossingWithoutTap > crossingSafeBottom
+                val crossingTapSafe = crossingWithTap in crossingSafeTop..crossingSafeBottom
+                val crossingTapImproves = abs(crossingWithTap - (crossingSafeTop + crossingSafeBottom) * 0.5f) <
+                    abs(crossingWithoutTap - (crossingSafeTop + crossingSafeBottom) * 0.5f)
                 val crossingCanTap = !tapFeedbackPending && !gestureInFlight.get() &&
                     (lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L)
-                val shouldCrossingTap = crossingCanTap && crossingNeedsCorrection && crossingTapImproves
+                val shouldCrossingTap = crossingCanTap && crossingNeedsCorrection &&
+                    crossingTapSafe && crossingTapImproves
                 appendRunLog(
-                    "POST_PIPE_CONTROL trackId=${activePipeTrackId} frontX=${d.obstacleX} " +
+                    "POST_PIPE_CONTROL trackId=$activePipeTrackId frontX=${d.obstacleX} " +
                         "trailingX=$pipeRightEdge birdRight=$birdRightEdge gap=${d.gapTop}..${d.gapBottom} " +
                         "safe=${crossingSafeTop.toInt()}..${crossingSafeBottom.toInt()} " +
                         "wait180=${crossingWithoutTap.toInt()} flap180=${crossingWithTap.toInt()} " +
-                        "waitWorst=${crossingWaitWorstMiss.toInt()} planN=${selectedCrossingTimes.size} " +
-                        "intervals=$crossingIntervalsText emergency=$crossingEmergencySelected " +
-                        "planMiss=${selectedCrossingWorstMiss.toInt()} " +
                         "selected=${if (shouldCrossingTap) "FLAP" else "WAIT"}"
                 )
-                if (shouldCrossingTap && tap(
-                        tapX, tapY,
-                        if (crossingEmergencySelected) "POST_PIPE_EMERGENCY" else "POST_PIPE",
-                        velocity, d.birdY
-                    )) {
+                if (shouldCrossingTap && tap(tapX, tapY, "POST_PIPE", velocity, d.birdY)) {
                     lastAutoTapAt = now
                     autoTapCount++
                     attemptAutoTaps++
                     attemptFlapDecisions++
-                    attemptLastAction = if (crossingEmergencySelected) "FLAP_POST_PIPE_EMERGENCY" else "FLAP_POST_PIPE"
-                    attemptLastDecision = if (crossingEmergencySelected) "POST_PIPE_EMERGENCY_RESCUE" else "POST_PIPE_GAP_CORRECTION"
-                    appendRunLog(
-                        "ACTION_SPACE selected=FLAP reason=${if (crossingEmergencySelected) "POST_PIPE_EMERGENCY_RESCUE" else "POST_PIPE_GAP_CORRECTION"} " +
-                            "planN=${selectedCrossingTimes.size} intervals=$crossingIntervalsText dispatch=FIRST_TAP_REPLAN_AFTER_FEEDBACK"
-                    )
-                    screenStatus = if (crossingEmergencySelected)
-                        "АВАРИЙНЫЙ ПОДЪЁМ • план ${selectedCrossingTimes.size} тап(ов)"
-                    else
-                        "ПРОХОЖУ ТРУБУ • корректирую высоту"
+                    attemptLastAction = "FLAP_POST_PIPE"
+                    attemptLastDecision = "POST_PIPE_GAP_CORRECTION"
+                    appendRunLog("ACTION_SPACE selected=FLAP reason=POST_PIPE_GAP_CORRECTION")
+                    screenStatus = "ПРОХОЖУ ТРУБУ • корректирую высоту"
                 } else {
                     attemptWaitDecisions++
                     attemptLastAction = "WAIT_POST_PIPE"
-                    attemptLastDecision = if (crossingEmergencySelected) "POST_PIPE_EMERGENCY_WAIT" else "POST_PIPE_GAP_HOLD"
+                    attemptLastDecision = "POST_PIPE_GAP_HOLD"
                     val reason = when {
                         tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
                         gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
                         !crossingNeedsCorrection -> "PREDICTED_PATH_IN_GAP"
-                        !crossingTapImproves -> if (crossingLowSideEmergency) "NO_IMPROVING_RESCUE_SCHEDULE" else "NO_SAFE_OR_RESCUE_SCHEDULE"
-                        !crossingCanTap -> "TAP_SPACING_OR_FEEDBACK"
-                        else -> "TAP_REJECTED"
+                        !crossingTapSafe -> "TAP_WOULD_LEAVE_GAP"
+                        !crossingTapImproves -> "TAP_NOT_IMPROVING"
+                        else -> "TAP_SPACING_OR_REJECTED"
                     }
                     appendRunLog("ACTION_SPACE selected=WAIT reason=$reason")
-                    screenStatus = if (crossingEmergencySelected)
-                        "АВАРИЙНЫЙ ПРОГНОЗ • ожидаю подтверждение тапа"
-                    else
-                        "ПРОХОЖУ ТРУБУ • удерживаю безопасную траекторию"
+                    screenStatus = "ПРОХОЖУ ТРУБУ • удерживаю безопасную траекторию"
                 }
             } else if (d.obstacleX >= 0) {
                 // If a real obstacle is visible but its gap is uncertain, do not mistake it
