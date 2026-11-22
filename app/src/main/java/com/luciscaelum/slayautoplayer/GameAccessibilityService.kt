@@ -44,6 +44,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var lastBirdScaleMode = "UNKNOWN"
     private var previousBirdAt = 0L
     private var lastAutoTapAt = 0L
+    private var lastTapFeedbackAt = 0L
     private var lastSceneSeenAt = 0L
     private var previousObstacleX = -1
     private var previousObstacleAt = 0L
@@ -64,6 +65,11 @@ class GameAccessibilityService : AccessibilityService() {
         val baselineVelocity: Float,
         val baselineY: Int,
         @Volatile var completedAt: Long = 0L
+    )
+    private data class TapFeedbackResult(
+        val pending: Boolean = false,
+        val resolved: Boolean = false,
+        val confirmedVelocity: Float? = null
     )
     private val tapObservationLock = Any()
     private var pendingTapObservation: PendingTapObservation? = null
@@ -1034,27 +1040,27 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun updateTapFeedback(
         now: Long, dt: Float, rawVelocity: Float, gravity: Float
-    ): Pair<Boolean, Boolean> {
+    ): TapFeedbackResult {
         val snapshot = synchronized(tapObservationLock) {
             pendingTapObservation?.let { it to it.completedAt }
-        } ?: return false to false
+        } ?: return TapFeedbackResult()
         val pending = snapshot.first
         val completedAt = snapshot.second
-        // Ignore a frame overlapping the gesture. Measure a complete bird-motion interval
-        // that starts after Android confirms completion.
+        // Measure only a complete frame interval that begins after Android completed the gesture.
         if (completedAt <= 0L || previousBirdAt < completedAt || now - completedAt < 45L) {
-            return true to true
+            return TapFeedbackResult(pending = true)
         }
+
         val observed = (rawVelocity - gravity * dt * 0.5f).coerceIn(-3.2f, 0.8f)
         val oldEstimate = estimatedFlapVelocity
-        // Only a confirmed Bird Play gesture may train flap physics. A rolling median
-        // rejects isolated CV outliers instead of letting one frame rewrite the model.
-        val sampleMidpointElapsed = (now.toFloat() - dt * 0.5f - pending.requestedAt.toFloat()).coerceAtLeast(0f)
+        val sampleMidpointElapsed =
+            (now.toFloat() - dt * 0.5f - pending.requestedAt.toFloat()).coerceAtLeast(0f)
         val expectedWithoutFlap = pending.baselineVelocity + gravity * sampleMidpointElapsed
         val responseStrength = expectedWithoutFlap - observed
         val confirmed = observed in -3.0f..-0.08f &&
             responseStrength >= max(0.16f, abs(expectedWithoutFlap) * 0.18f)
         var calibrationRejectReason = "NOT_CONFIRMED"
+
         if (confirmed) {
             val prior = flapImpulseSamples.toList().sorted()
             val priorMedian = when {
@@ -1076,25 +1082,26 @@ class GameAccessibilityService : AccessibilityService() {
             } else {
                 calibrationRejectReason = "OUTLIER"
                 appendRunLog(
-                    "FLAP_CALIBRATION_SAMPLE_REJECTED tapId=${pending.id} observed=${fmt(observed)} " +
-                        "referenceMedian=${fmt(priorMedian)} limit=${fmt(outlierLimit)}"
+                    "FLAP_CALIBRATION_SAMPLE_REJECTED tapId=\${pending.id} observed=\${fmt(observed)} " +
+                        "referenceMedian=\${fmt(priorMedian)} limit=\${fmt(outlierLimit)}"
                 )
             }
         }
+
+        lastTapFeedbackAt = now
         appendRunLog(
-            "PHYSICS_RESPONSE tapId=${pending.id} source=${pending.source} " +
-                "requestAge=${now - pending.requestedAt}ms postGesture=${now - completedAt}ms " +
-                "baselineY=${pending.baselineY} baselineV=${fmt(pending.baselineVelocity)} " +
-                "expectedNoFlap=${fmt(expectedWithoutFlap)} response=${fmt(responseStrength)} " +
-                "raw=${fmt(rawVelocity)} observed=${fmt(observed)} confirmed=$confirmed " +
-                "calibration=$calibrationRejectReason samples=${flapImpulseSamples.size} " +
-                "flapV=${fmt(oldEstimate)}->${fmt(estimatedFlapVelocity)}"
+            "PHYSICS_RESPONSE tapId=\${pending.id} source=\${pending.source} " +
+                "requestAge=\${now - pending.requestedAt}ms postGesture=\${now - completedAt}ms " +
+                "baselineY=\${pending.baselineY} baselineV=\${fmt(pending.baselineVelocity)} " +
+                "expectedNoFlap=\${fmt(expectedWithoutFlap)} response=\${fmt(responseStrength)} " +
+                "raw=\${fmt(rawVelocity)} observed=\${fmt(observed)} confirmed=$confirmed " +
+                "calibration=$calibrationRejectReason samples=\${flapImpulseSamples.size} " +
+                "flapV=\${fmt(oldEstimate)}->\${fmt(estimatedFlapVelocity)}"
         )
         synchronized(tapObservationLock) {
             if (pendingTapObservation?.id == pending.id) pendingTapObservation = null
         }
-        // This sample belongs to the automated tap, not to a manual flap.
-        return false to true
+        return TapFeedbackResult(resolved = true, confirmedVelocity = observed.takeIf { confirmed })
     }
 
     private fun handleAutoControl(
@@ -2103,6 +2110,7 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var learnedChecksum = "EMPTY"
         const val RL_FLAP = 0
         const val RL_WAIT = 1
+        private const val MIN_TAP_INTERVAL_MS = 250L
         private const val MAX_RUN_LOG_LINES = 50000
         private const val RUN_LOG_FLUSH_BATCH_SIZE = 64
         private const val RUN_LOG_FILE_NAME = "bird-play-session.txt"
