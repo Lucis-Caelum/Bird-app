@@ -2138,7 +2138,8 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var learnedChecksum = "EMPTY"
         const val RL_FLAP = 0
         const val RL_WAIT = 1
-        private const val MIN_TAP_INTERVAL_MS = 250L
+        // At the 80 ms frame cadence, the feedback-frame gate adds one frame; 200 ms yields an effective ~240–280 ms tap gap.
+        private const val MIN_TAP_INTERVAL_MS = 200L
         private const val PERFORMANCE_LOG_THRESHOLD_MS = 45L
         private const val MAX_RUN_LOG_LINES = 50000
         private const val RUN_LOG_FLUSH_BATCH_SIZE = 64
