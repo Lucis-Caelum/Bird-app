@@ -170,12 +170,11 @@ class GameAccessibilityService : AccessibilityService() {
 
     private fun persistFlapCalibration(source: String) {
         if (!estimatedFlapVelocity.isFinite() || estimatedFlapVelocity !in -3.0f..-0.08f) return
-        val saved = getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
+        getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
             .putFloat("estimated_flap_velocity", estimatedFlapVelocity)
-            .commit()
+            .apply()
         appendRunLog(
-            "FLAP_CALIBRATION_SAVE source=$source value=${fmt(estimatedFlapVelocity)} " +
-                "status=${if (saved) "OK" else "FAILED"}"
+            "FLAP_CALIBRATION_SAVE source=$source value=${fmt(estimatedFlapVelocity)} status=QUEUED"
         )
     }
 
@@ -765,28 +764,22 @@ class GameAccessibilityService : AccessibilityService() {
                 .put("total_pipe_passes", qLearningTotalPipePasses)
                 .put("total_episodes", qLearningTotalEpisodes)
                 .put("checksum", checksum)
-            val committed = getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
+            getSharedPreferences("bird_play_learning", MODE_PRIVATE).edit()
                 .putString("q_table", serialized)
                 .putString("q_table_meta", meta.toString())
-                .commit()
-            if (committed) {
-                qLearningRevision = revision
-                qLearningUpdatedAt = updatedAt
-                qLearningChecksum = checksum
-                qLearningMetaStatus = "SAVED"
-                learnedRevision = revision
-                learnedUpdatedAt = updatedAt
-                learnedChecksum = checksum
-                learnedStateCount = qLearningTable.size
-                learnedPipeCount = qLearningTotalPipePasses
-                appendRunLog("RL_TABLE_SAVED revision=" + revision + " states=" + qLearningTable.size +
-                    " episodes=" + qLearningTotalEpisodes + " totalPipes=" + qLearningTotalPipePasses +
-                    " checksum=" + checksum + " commit=OK")
-            } else {
-                qLearningMetaStatus = "SAVE_FAILED"
-                appendRunLog("RL_TABLE_SAVED revision=" + revision + " states=" + qLearningTable.size +
-                    " checksum=" + checksum + " commit=FAILED")
-            }
+                .apply()
+            qLearningRevision = revision
+            qLearningUpdatedAt = updatedAt
+            qLearningChecksum = checksum
+            qLearningMetaStatus = "SAVED_QUEUED"
+            learnedRevision = revision
+            learnedUpdatedAt = updatedAt
+            learnedChecksum = checksum
+            learnedStateCount = qLearningTable.size
+            learnedPipeCount = qLearningTotalPipePasses
+            appendRunLog("RL_TABLE_SAVED revision=" + revision + " states=" + qLearningTable.size +
+                " episodes=" + qLearningTotalEpisodes + " totalPipes=" + qLearningTotalPipePasses +
+                " checksum=" + checksum + " commit=QUEUED")
         } catch (e: Exception) {
             qLearningMetaStatus = "SAVE_ERROR"
             appendRunLog("RL table save error=" + e.javaClass.simpleName)
@@ -2025,7 +2018,13 @@ class GameAccessibilityService : AccessibilityService() {
         return true
     }
 
-    private fun fmt(value: Float): String = String.format(java.util.Locale.US, "%.3f", value)
+    private fun fmt(value: Float): String {
+        if (!value.isFinite()) return "NaN"
+        val scaled = (value * 1000f).roundToInt()
+        val magnitude = abs(scaled)
+        val fraction = (magnitude % 1000).toString().padStart(3, '0')
+        return (if (scaled < 0) "-" else "") + (magnitude / 1000) + "." + fraction
+    }
 
     private fun runLogFile(): File = File(filesDir, RUN_LOG_FILE_NAME)
 
