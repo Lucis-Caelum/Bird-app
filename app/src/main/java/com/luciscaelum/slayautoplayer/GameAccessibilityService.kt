@@ -1487,14 +1487,14 @@ class GameAccessibilityService : AccessibilityService() {
             val existingDueAt = scheduledInterceptAt
             if (dueAt >= existingDueAt - 20L) {
                 appendRunLog(
-                    "INTERCEPT_DISPATCH_KEEP trackId=$trackId existingIn=${(existingDueAt - now).coerceAtLeast(0L)}ms " +
-                        "newIn=${(dueAt - now).coerceAtLeast(0L)}ms reason=NO_POSTPONE"
+                    "INTERCEPT_DISPATCH_KEEP trackId=$trackId existingIn=${(existingDueAt - scheduleCreatedAt).coerceAtLeast(0L)}ms " +
+                        "newIn=${(dueAt - scheduleCreatedAt).coerceAtLeast(0L)}ms reason=NO_POSTPONE"
                 )
                 return true
             }
             appendRunLog(
                 "INTERCEPT_DISPATCH_RETIME_EARLIER trackId=$trackId " +
-                    "oldIn=${(existingDueAt - now).coerceAtLeast(0L)}ms newIn=${(dueAt - now).coerceAtLeast(0L)}ms"
+                    "oldIn=${(existingDueAt - scheduleCreatedAt).coerceAtLeast(0L)}ms newIn=${(dueAt - scheduleCreatedAt).coerceAtLeast(0L)}ms"
             )
         }
         cancelScheduledInterceptTap("REPLANNED_EARLIER")
