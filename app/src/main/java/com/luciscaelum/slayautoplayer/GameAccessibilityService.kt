@@ -627,20 +627,35 @@ class GameAccessibilityService : AccessibilityService() {
             // A run is accepted only when most separated columns agree, not from one narrow stripe.
             vertical[sy] = count >= 3
         }
-        val runs = mutableListOf<Pair<Int, Int>>()
+        val rawRuns = mutableListOf<Pair<Int, Int>>()
         var runStart = -1
         for (i in 0 until sampleH) {
             if (vertical[i]) {
                 if (runStart < 0) runStart = i
             } else if (runStart >= 0) {
                 if ((i - runStart) * step >= h * 0.045f) {
-                    runs.add(runStart * step to i * step)
+                    rawRuns.add(runStart * step to i * step)
                 }
                 runStart = -1
             }
         }
         if (runStart >= 0 && (sampleH - runStart) * step >= h * 0.045f) {
-            runs.add(runStart * step to h)
+            rawRuns.add(runStart * step to h)
+        }
+
+        // Pipe artwork contains narrow horizontal texture breaks. They are not real openings:
+        // merge adjacent vertical runs separated by <=2.5% of field height before choosing
+        // the largest gap. Previously 3–9 px stripe breaks counted as extra "pipes",
+        // depressing confidence to ~0.328 and disabling the controller during approach.
+        val runMergeTolerance = max(step * 2, (h * 0.025f).toInt())
+        val runs = ArrayList<Pair<Int, Int>>(rawRuns.size)
+        for (run in rawRuns) {
+            val previous = runs.lastOrNull()
+            if (previous != null && run.first - previous.second <= runMergeTolerance) {
+                runs[runs.lastIndex] = previous.first to run.second
+            } else {
+                runs.add(run)
+            }
         }
         if (runs.size < 2) {
             reuseRecentGap("RUNS_" + runs.size)?.let { return it }
@@ -652,7 +667,8 @@ class GameAccessibilityService : AccessibilityService() {
                 pipeBounds = "${nearest.first}..${nearest.second}",
                 birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
                 pipeLeft = nearest.first, pipeRight = nearest.second,
-                pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
+                pipeRuns = "raw=${rawRuns.size}->merged=${runs.size}:" +
+                    runs.joinToString(";") { "${it.first}..${it.second}" },
                 pipeConfidence = (0.22f + runs.size * 0.09f).coerceAtMost(0.52f),
                 birdScale = birdScale
             )
@@ -678,7 +694,8 @@ class GameAccessibilityService : AccessibilityService() {
                 pipeBounds = "${nearest.first}..${nearest.second}",
                 birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
                 pipeLeft = nearest.first, pipeRight = nearest.second,
-                pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
+                pipeRuns = "raw=${rawRuns.size}->merged=${runs.size}:" +
+                    runs.joinToString(";") { "${it.first}..${it.second}" },
                 pipeConfidence = 0.42f,
                 birdScale = birdScale
             )
@@ -687,9 +704,14 @@ class GameAccessibilityService : AccessibilityService() {
         val safety = (h * 0.045f).toInt()
         gapTop = (gapTop + safety).coerceAtMost(h - 1)
         gapBottom = (gapBottom - safety).coerceAtLeast(gapTop + 1)
-        val runShapeScore = if (runs.size == 2) 0.88f else (0.78f - (runs.size - 2) * 0.11f).coerceAtLeast(0.34f)
-        val gapShapeScore = (1f - kotlin.math.abs(largestGap.toFloat() / h - 0.32f) * 0.55f).coerceIn(0.45f, 1f)
-        val pipeConfidence = (runShapeScore * gapShapeScore).coerceIn(0.25f, 0.92f)
+        val runShapeScore = when {
+            runs.size == 2 -> 0.90f
+            runs.size > 2 -> (0.82f - (runs.size - 2) * 0.08f).coerceAtLeast(0.52f)
+            else -> 0.30f
+        }
+        val gapShapeScore = (1f - kotlin.math.abs(largestGap.toFloat() / h - 0.32f) * 0.45f)
+            .coerceIn(0.58f, 1f)
+        val pipeConfidence = (runShapeScore * gapShapeScore).coerceIn(0.30f, 0.94f)
         cachedGapPipeX = pipeLeadingEdgeX
         cachedGapPipeLeft = nearest.first
         cachedGapPipeRight = nearest.second
@@ -709,7 +731,8 @@ class GameAccessibilityService : AccessibilityService() {
             pipeBounds = "${nearest.first}..${nearest.second}",
             birdLeft = birdLeft, birdRight = birdRight, birdTop = birdTop, birdBottom = birdBottom,
             pipeLeft = nearest.first, pipeRight = nearest.second,
-            pipeRuns = runs.joinToString(";") { "${it.first}..${it.second}" },
+            pipeRuns = "raw=${rawRuns.size}->merged=${runs.size}:" +
+                    runs.joinToString(";") { "${it.first}..${it.second}" },
             pipeConfidence = pipeConfidence,
             birdScale = birdScale
         )
@@ -1629,8 +1652,8 @@ class GameAccessibilityService : AccessibilityService() {
                 // unavoidable fall without repeatedly pulling the bird toward screen centre.
                 val prepipeHorizon = 420f
                 val prepipeTapAt = 65f
-                val prepipeUpper = fieldHeight * 0.20f
-                val prepipeLower = fieldHeight * 0.64f
+                val prepipeUpper = fieldHeight * 0.38f
+                val prepipeLower = fieldHeight * 0.63f
                 val predictedWithoutTap = predictTrajectoryAtPipe(
                     d.birdY.toFloat(), velocity, gravity, prepipeHorizon, floatArrayOf()
                 )
@@ -1697,7 +1720,7 @@ class GameAccessibilityService : AccessibilityService() {
                 val predictedWithTap = predictTrajectoryAtPipe(
                     d.birdY.toFloat(), velocity, gravity, cruiseHorizon, floatArrayOf(65f)
                 )
-                val cruiseUpper = fieldHeight * 0.22f
+                val cruiseUpper = fieldHeight * 0.36f
                 val cruiseLower = fieldHeight * 0.65f
                 val minImprovement = max(25f, fieldHeight * 0.03f)
                 val cruiseNeedsLift = predictedWithoutTap > cruiseLower && velocity > -0.12f
@@ -1773,7 +1796,10 @@ class GameAccessibilityService : AccessibilityService() {
         // Different inter-tap timings create different lifts. Search complete schedules
         // from one to four taps, execute only the first tap, then re-plan from measured motion.
         val reactionMs = 65f
-        val safeMargin = (gapHeight * 0.10f).coerceAtLeast(fieldHeight * 0.010f)
+        val confidenceExtraMargin = ((0.55f - d.pipeConfidence).coerceAtLeast(0f) / 0.25f)
+            .coerceAtMost(1f) * gapHeight * 0.045f
+        val safeMargin = (gapHeight * 0.10f + confidenceExtraMargin)
+            .coerceAtLeast(fieldHeight * 0.010f)
         val birdHalfHeight = if (d.birdTop >= 0 && d.birdBottom > d.birdTop)
             (d.birdBottom - d.birdTop) * 0.5f else fieldHeight * 0.04f
         val safeTop = gapTop + safeMargin + birdHalfHeight
@@ -1932,8 +1958,8 @@ class GameAccessibilityService : AccessibilityService() {
         val safetyMissThreshold = max(gapHeight * 0.12f, fieldHeight * 0.02f)
         val recoveryPossible = bestPlan != null
         val planFullySafe = bestSafePlan != null
-        val gapTrusted = d.pipeConfidence >= 0.55f ||
-            (timeToPipe <= 250f && d.pipeConfidence >= 0.42f)
+        val gapTrusted = d.pipeConfidence >= MIN_GAP_CONFIDENCE_FOR_CONTROL &&
+            gapHeight >= fieldHeight * 0.08f && gapHeight <= fieldHeight * 0.62f
         val tapDispatchWindow = reactionMs + 45f
         val planningConditionsValid = distanceWindow && safeWindowValid && gapTrusted &&
             !tapFeedbackPending && waitActionMiss > safetyMissThreshold && recoveryPossible
@@ -2010,7 +2036,8 @@ class GameAccessibilityService : AccessibilityService() {
         if (shouldTap) attemptFlapDecisions++ else attemptWaitDecisions++
         appendRunLog(
             "FRAME bird=${d.birdY} box=${d.birdBounds} v=${fmt(velocity)} raw=${fmt(rawVelocity)} g=${fmt(gravity)}" +
-                " pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} score=${fmt(d.pipeConfidence)} gap=${gapTop.toInt()}..${gapBottom.toInt()}" +
+                " pipeX=${d.obstacleX} pipeBox=${d.pipeBounds} runs=${d.pipeRuns} score=${fmt(d.pipeConfidence)}" +
+                " gapTrusted=$gapTrusted safeMargin=${safeMargin.toInt()} gap=${gapTop.toInt()}..${gapBottom.toInt()}" +
                 " dist=${distance.toInt()} speed=${fmt(obstacleSpeed)} t=${timeToPipe.toInt()} overlap=${collisionDuration.toInt()}ms" +
                 " wait100=${wait100.toInt()} wait200=${wait200.toInt()} wait300=${wait300.toInt()} wait400=${wait400.toInt()}" +
                 " zeroEntry/Mid/Exit=${zeroEntryY.toInt()}/${zeroMiddleY.toInt()}/${zeroExitY.toInt()}" +
@@ -2337,6 +2364,7 @@ class GameAccessibilityService : AccessibilityService() {
         // At the 80 ms frame cadence, the feedback-frame gate adds one frame; 200 ms yields an effective ~240–280 ms tap gap.
         private const val MIN_TAP_INTERVAL_MS = 200L
         private const val RL_REWARD_SCHEMA = 3
+        private const val MIN_GAP_CONFIDENCE_FOR_CONTROL = 0.30f
         private const val RL_MAX_Q_STATES = 5000
         private const val RL_MAX_EPISODE_TRANSITIONS = 1800
         // One safely explored FLAP gives the first actionable comparison; later policy choices keep updating it.
