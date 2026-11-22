@@ -1,21 +1,38 @@
-# Bird Play (Android prototype)
+# Bird Play — Android gameplay automation prototype
 
-Version 0.1.0 is an instrumentation build, not a finished autonomous player.
+> **Article ID:** BRD-001  
+> **Author:** ChatGPT (OpenAI)  
+> **Document status:** Maintained project index  
+> **Current app version:** 0.43.0 (versionCode 56)
 
-## Build
-GitHub Actions builds a debug APK on every push to main and on manual workflow dispatch. Download the artifact named **Bird-Play-debug** from the Actions run.
+Bird Play is an Android prototype that observes a Flappy-style game through screen capture, detects the bird and pipe gaps, predicts the bird's vertical trajectory, and sends touch gestures through Android Accessibility. The objective is to pass as many pipe pairs as possible while keeping the game visible and allowing immediate manual takeover.
 
-## Setup on Android
-1. Install the APK.
-2. Open the app and grant **Display over other apps**.
-3. Open Accessibility settings and enable **Bird Play control**.
-4. Return to the app and choose **Show floating panel**.
-5. Open the supported mini-game. The panel has pause/manual-takeover/stop controls.
+## Repository
 
-## Current limitations
-- Autoplay is intentionally disabled by default.
-- Score OCR and obstacle recognition are not implemented or calibrated.
-- The game is rendered in a web canvas, so accessibility text may not expose the score.
-- Do not treat this build as capable of reaching a target score. A gameplay capture from the target phone is required to calibrate the vision logic and test tap timing.
+- GitHub: https://github.com/Lucis-Caelum/Bird-app
+- Main source: `app/src/main/java/com/luciscaelum/slayautoplayer/GameAccessibilityService.kt`
+- APK download branch: `apk-download`
+- Current APK: https://raw.githubusercontent.com/Lucis-Caelum/Bird-app/apk-download/Bird-Play.apk
 
-The accessibility service only exposes a guarded gesture method; the overlay does not send automatic taps.
+## Documentation
+
+- [Project overview](docs/PROJECT_OVERVIEW.md)
+- [Goals and development plan](docs/GOALS_AND_ROADMAP.md)
+- [Technical findings and known problems](docs/TECHNICAL_FINDINGS.md)
+- [Latest test session log — 2026-11-22 17:36:05](docs/SESSION_LOG_2026-11-22_17-36-05.md)
+
+## Current status at a glance
+
+Version 0.43.0 fixed an execution-continuity problem: a queued intercept tap should not be discarded merely because a new frame briefly fails to produce another plan. A pending tap for the same tracked pipe is retained when the geometry is trusted and waiting is still predicted to be unsafe; the deadline can be moved earlier but not postponed.
+
+The latest 18-attempt test showed one clearly longer run (7 pipes), three runs with 2 pipes, four runs with 1 pipe, and ten runs with 0 pipes. The main remaining problems are excessive/poorly timed taps, incomplete feedback stabilization between taps, and unstable pipe-gap geometry when detections change between frames.
+
+## Build and installation
+
+GitHub Actions builds the Android debug APK on pushes to `main`. The published APK is placed on `apk-download`. Install the APK on the Android device and grant the overlay and Accessibility permissions requested by the app. Keep the game visible during testing; the automation relies on captured frames.
+
+## Important
+
+This is an experimental prototype, not a finished autonomous player. A successful build only confirms that the app compiled and was published; it does not mean the gameplay controller is reliable. Every gameplay change must be evaluated against unattended test logs.
+
+See the linked documents for the current technical state, test evidence, goals, and next work items.
