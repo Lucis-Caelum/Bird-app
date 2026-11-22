@@ -297,6 +297,7 @@ class GameAccessibilityService : AccessibilityService() {
     }
 
     fun processCapturedFrame(frame: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+        val frameStartedAt = SystemClock.elapsedRealtime()
         val safeCropTop = cropTop.coerceIn(0, frame.height - 1)
         val fieldHeight = (frame.height - safeCropTop).coerceAtLeast(1)
         val detectionStartedAt = SystemClock.elapsedRealtime()
@@ -342,8 +343,11 @@ class GameAccessibilityService : AccessibilityService() {
         }
         wasActiveGame = detection.activeGame
         if (monitoring && !paused && !manual) {
+            val controlStartedAt = SystemClock.elapsedRealtime()
             handleAutoControl(detection, frame.width, fieldHeight, safeCropTop, screenW, screenH)
+            lastControlMs = SystemClock.elapsedRealtime() - controlStartedAt
         } else {
+            lastControlMs = 0L
             screenStatus = "ПРЕДПРОСМОТР • " + detection.message
         }
         lastFrameWidth = frame.width
@@ -353,7 +357,14 @@ class GameAccessibilityService : AccessibilityService() {
         lastObstacleX = detection.obstacleX
         lastGapTop = detection.gapTop
         lastGapBottom = detection.gapBottom
-        screenStatus = "$screenStatus • CV ${lastDetectionMs}мс"
+        val frameProcessingMs = SystemClock.elapsedRealtime() - frameStartedAt
+        if (monitoring && frameProcessingMs >= PERFORMANCE_LOG_THRESHOLD_MS) {
+            appendRunLog(
+                "PERFORMANCE frameMs=$frameProcessingMs cvMs=$lastDetectionMs " +
+                    "controlMs=$lastControlMs targetFrameMs=80"
+            )
+        }
+        screenStatus = "$screenStatus • CV ${lastDetectionMs}мс • CTRL ${lastControlMs}мс"
     }
 
     private data class Detection(
@@ -2113,6 +2124,7 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastDetectionMs = 0L
         @Volatile var autoTapCount = 0
         @Volatile var lastFrameHeight = 0
+        @Volatile var lastControlMs = 0L
         @Volatile var lastBirdX = -1
         @Volatile var lastBirdY = -1
         @Volatile var lastObstacleX = -1
@@ -2127,6 +2139,7 @@ class GameAccessibilityService : AccessibilityService() {
         const val RL_FLAP = 0
         const val RL_WAIT = 1
         private const val MIN_TAP_INTERVAL_MS = 250L
+        private const val PERFORMANCE_LOG_THRESHOLD_MS = 45L
         private const val MAX_RUN_LOG_LINES = 50000
         private const val RUN_LOG_FLUSH_BATCH_SIZE = 64
         private const val RUN_LOG_FILE_NAME = "bird-play-session.txt"
