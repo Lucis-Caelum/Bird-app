@@ -537,7 +537,7 @@ class GameAccessibilityService : AccessibilityService() {
         // Pipe columns were collected in the same pass above; use the sampled grid below.
 
         // Pipe occupancy is already present in columnCounts from the merged sampled scan.
-        val columnThreshold = max(10, (sampleH * 0.12f).toInt())        val columnThreshold = max(10, (sampleH * 0.12f).toInt())
+        val columnThreshold = max(10, (sampleH * 0.12f).toInt())
         if (detectorCandidateColumns.size < sampleW) detectorCandidateColumns = BooleanArray(sampleW)
         val candidateColumns = detectorCandidateColumns
         for (i in 0 until sampleW) candidateColumns[i] = columnCounts[i] >= columnThreshold
