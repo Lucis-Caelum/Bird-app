@@ -223,48 +223,54 @@ class GameAccessibilityService : AccessibilityService() {
                         return
                     }
 
-                    // Telegram status bar and Mini App header occupy the top ~11.7%.
-                    // Keep the complete playfield below them for visual game analysis.
+                    // Analyse the playfield directly from the source bitmap; avoid a full
+                    // cropped-bitmap allocation and copy on every legacy screenshot frame.
                     val top = (full.height * 0.117f).toInt().coerceIn(1, full.height - 1)
                     val screenW = full.width
                     val screenH = full.height
-                    val field = Bitmap.createBitmap(full, 0, top, screenW, screenH - top)
-                    full.recycle()
-
-                    screenshotIntervalMs = 650L
-                    val detection = detectPlayfield(field)
-                    if (detection.activeGame && !wasActiveGame) {
-                        recordAttemptStart(detection)
-                        previousBirdY = -1
-                        previousBirdX = -1
-                        baselineBirdWidth = -1f
-                        baselineBirdHeight = -1f
-                        lastBirdScaleMode = "UNKNOWN"
-                        previousBirdAt = 0L
-                        lastAutoTapAt = 0L
-                        seedBirdSizeBaseline(detection, "NEW_GAME_CAPTURE")
-                        screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
-                    } else if (!detection.activeGame && wasActiveGame) {
-                        recordAttemptEnd("GAME_OVER_OR_SCENE_LOST")
-                        previousBirdY = -1
-                        previousBirdX = -1
-                        baselineBirdWidth = -1f
-                        baselineBirdHeight = -1f
-                        lastBirdScaleMode = "UNKNOWN"
-                        previousBirdAt = 0L
-                        screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
+                    val fieldHeight = screenH - top
+                    try {
+                        screenshotIntervalMs = 650L
+                        val detection = detectPlayfield(full, top)
+                        if (detection.activeGame && !wasActiveGame) {
+                            recordAttemptStart(detection)
+                            previousBirdY = -1
+                            previousBirdX = -1
+                            baselineBirdWidth = -1f
+                            baselineBirdHeight = -1f
+                            lastBirdScaleMode = "UNKNOWN"
+                            previousBirdAt = 0L
+                            lastAutoTapAt = 0L
+                            lastTapFeedbackAt = 0L
+                            previousVerticalVelocity = 0f
+                            previousRawVerticalVelocity = 0f
+                            seedBirdSizeBaseline(detection, "NEW_GAME_CAPTURE")
+                            screenStatus = "ИГРА НАЧАЛАСЬ • включаю управление"
+                        } else if (!detection.activeGame && wasActiveGame) {
+                            recordAttemptEnd("GAME_OVER_OR_SCENE_LOST")
+                            previousBirdY = -1
+                            previousBirdX = -1
+                            baselineBirdWidth = -1f
+                            baselineBirdHeight = -1f
+                            lastBirdScaleMode = "UNKNOWN"
+                            previousBirdAt = 0L
+                            screenStatus = "КОНЕЦ ПОПЫТКИ • ожидаю повторный старт"
+                        }
+                        wasActiveGame = detection.activeGame
+                        handleAutoControl(detection, screenW, fieldHeight, top, screenW, screenH)
+                        lastFrameWidth = screenW
+                        lastFrameHeight = fieldHeight
+                        lastBirdX = detection.birdX
+                        lastBirdY = detection.birdY
+                        lastObstacleX = detection.obstacleX
+                        lastGapTop = detection.gapTop
+                        lastGapBottom = detection.gapBottom
+                    } catch (e: Exception) {
+                        screenStatus = "Ошибка анализа кадра: " + e.javaClass.simpleName
+                    } finally {
+                        if (!full.isRecycled) full.recycle()
+                        scanInFlight.set(false)
                     }
-                    wasActiveGame = detection.activeGame
-                    handleAutoControl(detection, field.width, field.height, top, screenW, screenH)
-                    lastFrameWidth = field.width
-                    lastFrameHeight = field.height
-                    lastBirdX = detection.birdX
-                    lastBirdY = detection.birdY
-                    lastObstacleX = detection.obstacleX
-                    lastGapTop = detection.gapTop
-                    lastGapBottom = detection.gapBottom
-                    field.recycle()
-                    scanInFlight.set(false)
                 }
 
                 override fun onFailure(errorCode: Int) {
@@ -291,9 +297,11 @@ class GameAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun processCapturedFrame(field: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+    fun processCapturedFrame(frame: Bitmap, cropTop: Int, screenW: Int, screenH: Int) {
+        val safeCropTop = cropTop.coerceIn(0, frame.height - 1)
+        val fieldHeight = (frame.height - safeCropTop).coerceAtLeast(1)
         val detectionStartedAt = SystemClock.elapsedRealtime()
-        val detection = detectPlayfield(field)
+        val detection = detectPlayfield(frame, safeCropTop)
         lastDetectionMs = SystemClock.elapsedRealtime() - detectionStartedAt
         if (detection.activeGame && !wasActiveGame) {
             ensureQLearningLoaded()
@@ -306,6 +314,7 @@ class GameAccessibilityService : AccessibilityService() {
             lastBirdScaleMode = "UNKNOWN"
             previousBirdAt = 0L
             lastAutoTapAt = 0L
+            lastTapFeedbackAt = 0L
             previousObstacleX = -1
             previousObstacleAt = 0L
             smoothedObstacleSpeed = 0f
@@ -334,12 +343,12 @@ class GameAccessibilityService : AccessibilityService() {
         }
         wasActiveGame = detection.activeGame
         if (monitoring && !paused && !manual) {
-            handleAutoControl(detection, field.width, field.height, cropTop, screenW, screenH)
+            handleAutoControl(detection, frame.width, fieldHeight, safeCropTop, screenW, screenH)
         } else {
             screenStatus = "ПРЕДПРОСМОТР • " + detection.message
         }
-        lastFrameWidth = field.width
-        lastFrameHeight = field.height
+        lastFrameWidth = frame.width
+        lastFrameHeight = fieldHeight
         lastBirdX = detection.birdX
         lastBirdY = detection.birdY
         lastObstacleX = detection.obstacleX
@@ -1895,6 +1904,7 @@ class GameAccessibilityService : AccessibilityService() {
         lastBirdScaleMode = "UNKNOWN"
         previousBirdAt = 0L
         lastAutoTapAt = 0L
+        lastTapFeedbackAt = 0L
         previousObstacleX = -1
         previousObstacleAt = 0L
         smoothedObstacleSpeed = 0f
