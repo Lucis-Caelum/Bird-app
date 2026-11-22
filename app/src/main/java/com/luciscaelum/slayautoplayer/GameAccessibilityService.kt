@@ -1387,7 +1387,7 @@ class GameAccessibilityService : AccessibilityService() {
                     appendRunLog("ACTION_SPACE selected=WAIT reason=$reason planN=$selectedTapCount")
                     screenStatus = "ПРОХОЖУ ТРУБУ • коррекция не нужна / ожидаю окно"
                 }
-            }            } else if (d.obstacleX >= 0) {
+            } else if (d.obstacleX >= 0) {
                 // If a real obstacle is visible but its gap is uncertain, do not mistake it
                 // for the open interval between pipes and do not blindly flap.
                 screenStatus = "ТРУБА x=${d.obstacleX} • уточняю просвет"
