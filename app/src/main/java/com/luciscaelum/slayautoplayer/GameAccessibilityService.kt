@@ -690,8 +690,8 @@ class GameAccessibilityService : AccessibilityService() {
         if (detectorVertical.size < sampleH) detectorVertical = BooleanArray(sampleH)
         val vertical = detectorVertical
         vertical.fill(false, 0, sampleH)
-        val pipeSampleXs = IntArray(7) { i ->
-            (nearest.first + (nearest.second - nearest.first) * (0.06f + i * 0.1466f))
+        val pipeSampleXs = IntArray(9) { i ->
+            (nearest.first + (nearest.second - nearest.first) * (0.02f + i * 0.12f))
                 .toInt().coerceIn(0, w - 1)
         }
         var crystalRowsDetected = 0
@@ -699,8 +699,6 @@ class GameAccessibilityService : AccessibilityService() {
             val y = sy * step
             var purpleVotes = 0
             var crystalVotes = 0
-            var adjacentCrystalPair = false
-            var previousSampleWasCrystal = false
             for (x in pipeSampleXs) {
                 val c = detectorPixels[y * w + x]
                 val r = (c ushr 16) and 255
@@ -711,15 +709,13 @@ class GameAccessibilityService : AccessibilityService() {
                 val orangeCrystalPixel = r >= 125 && gg in 28..190 && bl <= 150 &&
                     r > gg * 1.12 && r > bl * 1.18
                 if (purplePipePixel) purpleVotes++
-                if (orangeCrystalPixel) {
-                    crystalVotes++
-                    if (previousSampleWasCrystal) adjacentCrystalPair = true
-                }
-                previousSampleWasCrystal = orangeCrystalPixel
+                if (orangeCrystalPixel) crystalVotes++
             }
-            // Preserve the body majority vote, but also capture connected orange crystal tips.
-            vertical[sy] = purpleVotes >= 3 || (crystalVotes >= 2 && adjacentCrystalPair)
-            if (vertical[sy] && crystalVotes >= 2) crystalRowsDetected++
+            // The crystal tip narrows toward a point, so its farthest rows may touch
+            // only one of the nine x samples. A contiguous vertical run is validated below;
+            // isolated orange decoration pixels are too short to become a pipe boundary.
+            vertical[sy] = purpleVotes >= 3 || crystalVotes >= 1
+            if (vertical[sy] && crystalVotes >= 1) crystalRowsDetected++
         }
         val rawRuns = mutableListOf<Pair<Int, Int>>()
         var runStart = -1
@@ -727,13 +723,13 @@ class GameAccessibilityService : AccessibilityService() {
             if (vertical[i]) {
                 if (runStart < 0) runStart = i
             } else if (runStart >= 0) {
-                if ((i - runStart) * step >= h * 0.045f) {
+                if ((i - runStart) * step >= h * 0.025f) {
                     rawRuns.add(runStart * step to i * step)
                 }
                 runStart = -1
             }
         }
-        if (runStart >= 0 && (sampleH - runStart) * step >= h * 0.045f) {
+        if (runStart >= 0 && (sampleH - runStart) * step >= h * 0.025f) {
             rawRuns.add(runStart * step to h)
         }
 
