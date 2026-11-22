@@ -52,6 +52,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var previousRawVerticalVelocity = 0f
     private var estimatedFlapVelocity = -0.55f
     private var flapCalibrationLoaded = false
+    private val flapImpulseSamples = ArrayDeque<Float>()
     private var estimatedGravity = 0.0018f
     // Planned impulse time is a predicted in-game response time, not a blind tap timer.
     private var pendingPipeTapAt = 0L
@@ -117,7 +118,7 @@ class GameAccessibilityService : AccessibilityService() {
     private var attemptPipePasses = 0
     private var attemptNoTrackFrames = 0
     private var attemptAutoTaps = 0
-    private var attemptManualTaps = 0
+    private var attemptUnattributedImpulses = 0
     private var attemptRejectedTaps = 0
     private var attemptGestureCompleted = 0
     private var attemptGestureCancelled = 0
@@ -308,7 +309,6 @@ class GameAccessibilityService : AccessibilityService() {
             estimatedGravity = 0.0018f
             synchronized(tapObservationLock) { pendingTapObservation = null }
             autoTapCount = 0
-            manualTapCount = 0
             recordAttemptStart(detection)
             resetAttemptDiagnostics()
             seedBirdSizeBaseline(detection, "NEW_GAME_FRAME")
@@ -760,7 +760,7 @@ class GameAccessibilityService : AccessibilityService() {
         attemptPipePasses = 0
         attemptNoTrackFrames = 0
         attemptAutoTaps = 0
-        attemptManualTaps = 0
+        attemptUnattributedImpulses = 0
         attemptRejectedTaps = 0
         attemptGestureCompleted = 0
         attemptGestureCancelled = 0
@@ -785,7 +785,7 @@ class GameAccessibilityService : AccessibilityService() {
         appendRunLog(
             "ATTEMPT_SUMMARY reason=$reason duration=${duration}ms yRange=$minY..$maxY " +
                 "pipeFrames=$attemptPipeFrames uniquePipes=$attemptUniquePipeTracks passed=$attemptPipePasses " +
-                "noTrackFrames=$attemptNoTrackFrames autoTaps=$attemptAutoTaps manualTaps=$attemptManualTaps " +
+                "noTrackFrames=$attemptNoTrackFrames autoTaps=$attemptAutoTaps unattributedImpulses=$attemptUnattributedImpulses " +
                 "rejectedTaps=$attemptRejectedTaps gesturesDone=$attemptGestureCompleted gesturesCancelled=$attemptGestureCancelled " +
                 "decisionsFLAP=$attemptFlapDecisions decisionsWAIT=$attemptWaitDecisions " +
                 "qStatesUpdated=${attemptUpdatedQStates.size} qEpisode=${qLearningEpisode.size} " +
@@ -1019,18 +1019,39 @@ class GameAccessibilityService : AccessibilityService() {
         }
         val observed = (rawVelocity - gravity * dt * 0.5f).coerceIn(-3.2f, 0.8f)
         val oldEstimate = estimatedFlapVelocity
-        // Keep the no-flap response check, but trust a confirmed measured impulse.
-        // A tight artificial delta clamp was making the learned flap much weaker
-        // than the actual game response and causing unnecessary follow-up taps.
+        // Only a confirmed Bird Play gesture may train flap physics. A rolling median
+        // rejects isolated CV outliers instead of letting one frame rewrite the model.
         val sampleMidpointElapsed = (now.toFloat() - dt * 0.5f - pending.requestedAt.toFloat()).coerceAtLeast(0f)
         val expectedWithoutFlap = pending.baselineVelocity + gravity * sampleMidpointElapsed
         val responseStrength = expectedWithoutFlap - observed
         val confirmed = observed in -3.0f..-0.08f &&
             responseStrength >= max(0.16f, abs(expectedWithoutFlap) * 0.18f)
+        var calibrationRejectReason = "NOT_CONFIRMED"
         if (confirmed) {
-            estimatedFlapVelocity = (oldEstimate * 0.35f + observed * 0.65f)
-                .coerceIn(-3.0f, -0.08f)
-            persistFlapCalibration("AUTO_TAP")
+            val prior = flapImpulseSamples.toList().sorted()
+            val priorMedian = when {
+                prior.isEmpty() -> Float.NaN
+                prior.size % 2 == 1 -> prior[prior.size / 2]
+                else -> (prior[prior.size / 2 - 1] + prior[prior.size / 2]) * 0.5f
+            }
+            val outlierLimit = max(0.80f, abs(priorMedian) * 0.55f)
+            if (priorMedian.isNaN() || abs(observed - priorMedian) <= outlierLimit) {
+                flapImpulseSamples.addLast(observed)
+                while (flapImpulseSamples.size > 7) flapImpulseSamples.removeFirst()
+                val sorted = flapImpulseSamples.toList().sorted()
+                val median = if (sorted.size % 2 == 1) sorted[sorted.size / 2]
+                    else (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) * 0.5f
+                estimatedFlapVelocity = if (sorted.size == 1) median
+                    else (oldEstimate * 0.35f + median * 0.65f).coerceIn(-3.0f, -0.08f)
+                calibrationRejectReason = "ACCEPTED"
+                persistFlapCalibration("AUTO_TAP_MEDIAN")
+            } else {
+                calibrationRejectReason = "OUTLIER"
+                appendRunLog(
+                    "FLAP_CALIBRATION_SAMPLE_REJECTED tapId=${pending.id} observed=${fmt(observed)} " +
+                        "referenceMedian=${fmt(priorMedian)} limit=${fmt(outlierLimit)}"
+                )
+            }
         }
         appendRunLog(
             "PHYSICS_RESPONSE tapId=${pending.id} source=${pending.source} " +
@@ -1038,6 +1059,7 @@ class GameAccessibilityService : AccessibilityService() {
                 "baselineY=${pending.baselineY} baselineV=${fmt(pending.baselineVelocity)} " +
                 "expectedNoFlap=${fmt(expectedWithoutFlap)} response=${fmt(responseStrength)} " +
                 "raw=${fmt(rawVelocity)} observed=${fmt(observed)} confirmed=$confirmed " +
+                "calibration=$calibrationRejectReason samples=${flapImpulseSamples.size} " +
                 "flapV=${fmt(oldEstimate)}->${fmt(estimatedFlapVelocity)}"
         )
         synchronized(tapObservationLock) {
@@ -1110,16 +1132,15 @@ class GameAccessibilityService : AccessibilityService() {
         val velocity = if (previousBirdAt > 0L)
             previousVerticalVelocity * 0.32f + instantaneousVelocity * 0.68f else 0f
         val (tapFeedbackPending, hadTapFeedback) = updateTapFeedback(now, dt, rawVelocity, gravity)
-        if (!tapFeedbackPending && !hadTapFeedback && impulseDetected &&
-            (lastAutoTapAt == 0L || now - lastAutoTapAt > 280L)) {
-            val manualFlapVelocity = (rawVelocity - gravity * dt * 0.5f).coerceIn(-3.0f, -0.08f)
-            estimatedFlapVelocity = (estimatedFlapVelocity * 0.35f + manualFlapVelocity * 0.65f)
-                .coerceIn(-3.0f, -0.08f)
-            persistFlapCalibration("MANUAL_TAP")
-            manualTapCount++
-            attemptManualTaps++
-            if (pendingRlState != null) pendingRlAction = RL_FLAP
-            appendRunLog("ACTION manual_tap_detected estimatedFlapV=" + fmt(estimatedFlapVelocity) + " count=" + manualTapCount + " rl_action=FLAP")
+        if (!tapFeedbackPending && !hadTapFeedback && impulseDetected) {
+            // A velocity jump without an owned Bird Play gesture is not proof of a user tap.
+            // It may be sprite/CV jitter or game-side motion: log it, but do not train physics.
+            attemptUnattributedImpulses++
+            appendRunLog(
+                "UNATTRIBUTED_VERTICAL_IMPULSE raw=${fmt(rawVelocity)} " +
+                    "previousRaw=${fmt(previousRawVerticalVelocity)} dt=${dt.toInt()}ms " +
+                    "calibrationChanged=false count=$attemptUnattributedImpulses"
+            )
         }
         previousBirdY = d.birdY
         previousBirdX = d.birdX
@@ -1168,54 +1189,205 @@ class GameAccessibilityService : AccessibilityService() {
                 val crossingGapHeight = (d.gapBottom - d.gapTop).toFloat()
                 val crossingSafeTop = d.gapTop + crossingGapHeight * 0.18f
                 val crossingSafeBottom = d.gapBottom - crossingGapHeight * 0.18f
-                val crossingHorizon = 180f
-                val crossingWithoutTap = predictTrajectoryAtPipe(
-                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf()
+                val crossingReactionMs = 65f
+                val crossingSpeed = if (smoothedObstacleSpeed > 0.05f)
+                    smoothedObstacleSpeed else fieldWidth * 0.00075f
+                val remainingPipePixels = (pipeRightEdge - birdRightEdge).coerceAtLeast(0)
+                val crossingHorizon = (remainingPipePixels / crossingSpeed.coerceAtLeast(0.08f))
+                    .coerceIn(0f, 360f)
+                val crossingSampleTimes = floatArrayOf(
+                    crossingReactionMs,
+                    (crossingReactionMs + crossingHorizon) * 0.5f,
+                    crossingHorizon
                 )
-                val crossingWithTap = predictTrajectoryAtPipe(
-                    d.birdY.toFloat(), velocity, gravity, crossingHorizon, floatArrayOf(65f)
-                )
-                val crossingNeedsCorrection = crossingWithoutTap < crossingSafeTop ||
-                    crossingWithoutTap > crossingSafeBottom
-                val crossingTapSafe = crossingWithTap in crossingSafeTop..crossingSafeBottom
-                val crossingTapImproves = abs(crossingWithTap - (crossingSafeTop + crossingSafeBottom) * 0.5f) <
-                    abs(crossingWithoutTap - (crossingSafeTop + crossingSafeBottom) * 0.5f)
-                val crossingCanTap = !tapFeedbackPending && !gestureInFlight.get() &&
-                    (lastAutoTapAt == 0L || now - lastAutoTapAt >= 160L)
-                val shouldCrossingTap = crossingCanTap && crossingNeedsCorrection &&
-                    crossingTapSafe && crossingTapImproves
+                fun crossingMiss(y: Float): Float = when {
+                    y < crossingSafeTop -> crossingSafeTop - y
+                    y > crossingSafeBottom -> y - crossingSafeBottom
+                    else -> 0f
+                }
+                val waitYs = FloatArray(3) { i ->
+                    predictTrajectoryAtPipe(
+                        d.birdY.toFloat(), velocity, gravity, crossingSampleTimes[i], floatArrayOf()
+                    )
+                }
+                val waitMisses = FloatArray(3) { i -> crossingMiss(waitYs[i]) }
+                val waitWorstMiss = waitMisses.maxOrNull() ?: 0f
+                val waitMeanMiss = waitMisses.average().toFloat()
+
+                val crossingIntervals = floatArrayOf(160f, 240f, 320f, 400f)
+                val elapsedSinceLastImpulse = if (lastAutoTapAt > 0L)
+                    (now - lastAutoTapAt).toFloat() - crossingReactionMs else Float.POSITIVE_INFINITY
+                val pendingResponseDelay = if (pendingPipeTapAt > 0L &&
+                    pendingPipeTapTrackId == activePipeTrackId) {
+                    (pendingPipeTapAt - now).toFloat().coerceAtLeast(crossingReactionMs)
+                } else null
+                val initialTapDelays = if (lastAutoTapAt > 0L) {
+                    crossingIntervals.map { (it - elapsedSinceLastImpulse).coerceAtLeast(crossingReactionMs) }
+                } else listOf(65f, 160f, 220f, 280f, 340f)
+                val firstTapChoices = (initialTapDelays + listOfNotNull(pendingResponseDelay))
+                    .distinct().sorted()
+                val crossingCandidates = ArrayList<TapPlan>(48)
+                var crossingSchedulesEvaluated = 0
+
+                fun evaluateCrossingSchedule(schedule: List<Float>) {
+                    if (schedule.isEmpty() || schedule.size > 4) return
+                    if (schedule.last() + 20f >= crossingHorizon) return
+                    val taps = schedule.toFloatArray()
+                    val ys = FloatArray(3) { i ->
+                        predictTrajectoryAtPipe(
+                            d.birdY.toFloat(), velocity, gravity, crossingSampleTimes[i], taps
+                        )
+                    }
+                    val misses = FloatArray(3) { i -> crossingMiss(ys[i]) }
+                    val worstMiss = misses.maxOrNull() ?: 0f
+                    val meanMiss = misses.average().toFloat()
+                    val pendingMatch = pendingResponseDelay != null &&
+                        abs(schedule.first() - pendingResponseDelay) <= 12f
+                    val score = worstMiss + schedule.size * 6f + meanMiss * 0.12f -
+                        min(schedule.first(), 340f) * 0.025f - (if (pendingMatch) 10000f else 0f)
+                    crossingCandidates.add(
+                        TapPlan(taps, ys[0], ys[1], ys[2], worstMiss, meanMiss, score)
+                    )
+                    crossingSchedulesEvaluated++
+                }
+
+                fun expandCrossingSchedules(schedule: MutableList<Float>) {
+                    evaluateCrossingSchedule(schedule)
+                    if (schedule.size >= 4) return
+                    val previousAt = schedule.last()
+                    for (interval in crossingIntervals) {
+                        val nextAt = previousAt + interval
+                        if (nextAt + 20f >= crossingHorizon) continue
+                        schedule.add(nextAt)
+                        expandCrossingSchedules(schedule)
+                        schedule.removeAt(schedule.lastIndex)
+                    }
+                }
+
+                if (crossingHorizon > crossingReactionMs + 20f) {
+                    for (firstDelay in firstTapChoices) {
+                        if (firstDelay + 20f >= crossingHorizon) continue
+                        expandCrossingSchedules(mutableListOf(firstDelay))
+                    }
+                }
+
+                fun sameOrImprovedCrossingSide(candidateY: Float, naturalY: Float): Boolean {
+                    val naturalSide = when {
+                        naturalY < crossingSafeTop -> -1
+                        naturalY > crossingSafeBottom -> 1
+                        else -> 0
+                    }
+                    val candidateSide = when {
+                        candidateY < crossingSafeTop -> -1
+                        candidateY > crossingSafeBottom -> 1
+                        else -> 0
+                    }
+                    return when (naturalSide) {
+                        0 -> candidateSide == 0
+                        -1 -> candidateSide != 1
+                        else -> candidateSide != -1
+                    }
+                }
+                fun doesNotReverseCrossingCollision(candidate: TapPlan): Boolean =
+                    sameOrImprovedCrossingSide(candidate.entryY, waitYs[0]) &&
+                        sameOrImprovedCrossingSide(candidate.middleY, waitYs[1]) &&
+                        sameOrImprovedCrossingSide(candidate.exitY, waitYs[2])
+
+                val bestSafeCrossingPlan = crossingCandidates
+                    .filter { it.worstMiss <= 0f }
+                    .minByOrNull { it.score }
+                val maxRescueMiss = max(crossingGapHeight * 0.30f, fieldHeight * 0.06f)
+                val minRescueImprovement = max(7f, crossingGapHeight * 0.01f)
+                val bestRescueCrossingPlan = if (bestSafeCrossingPlan == null) {
+                    crossingCandidates.filter {
+                        it.worstMiss <= maxRescueMiss &&
+                            it.worstMiss <= waitWorstMiss + 8f &&
+                            it.meanMiss + minRescueImprovement < waitMeanMiss &&
+                            doesNotReverseCrossingCollision(it)
+                    }.minByOrNull { it.score }
+                } else null
+                val bestCrossingPlan = bestSafeCrossingPlan ?: bestRescueCrossingPlan
+                val selectedTapCount = bestCrossingPlan?.tapTimesMs?.size ?: 0
+                val firstTapDelay = bestCrossingPlan?.tapTimesMs?.firstOrNull() ?: 0f
+                val selectedSchedule = bestCrossingPlan?.tapTimesMs?.joinToString(",") {
+                    it.toInt().toString()
+                } ?: "NONE"
+                val pendingPlanMatches = pendingResponseDelay != null &&
+                    abs(firstTapDelay - pendingResponseDelay) <= 12f
+                val crossingPlanValid = crossingHorizon > crossingReactionMs + 20f &&
+                    waitWorstMiss > 0f && bestCrossingPlan != null
+                if (!crossingPlanValid && pendingPipeTapAt > 0L &&
+                    pendingPipeTapTrackId == activePipeTrackId) {
+                    appendRunLog("PIPE_TAP_PLAN_CANCEL reason=POST_PIPE_PLAN_NO_LONGER_VALID trackId=$activePipeTrackId")
+                    pendingPipeTapAt = 0L
+                    pendingPipeTapTrackId = -1
+                } else if (crossingPlanValid && firstTapDelay > crossingReactionMs + 45f &&
+                    !pendingPlanMatches) {
+                    pendingPipeTapAt = now + firstTapDelay.toLong()
+                    pendingPipeTapTrackId = activePipeTrackId
+                    appendRunLog(
+                        "PIPE_TAP_PLAN_SCHEDULED source=POST_PIPE trackId=$activePipeTrackId " +
+                            "responseIn=${firstTapDelay.toInt()}ms dispatchIn=${(firstTapDelay - crossingReactionMs).toInt()}ms " +
+                            "planN=$selectedTapCount miss=${bestCrossingPlan?.worstMiss?.toInt() ?: -1}"
+                    )
+                }
+                val tapWindowReady = bestCrossingPlan != null &&
+                    firstTapDelay <= crossingReactionMs + 45f
+                val canDispatchCrossingTap = !tapFeedbackPending && !gestureInFlight.get()
+                val shouldCrossingTap = crossingPlanValid && tapWindowReady && canDispatchCrossingTap
+                val planMiss = bestCrossingPlan?.worstMiss ?: waitWorstMiss
+                val planMode = when {
+                    bestSafeCrossingPlan != null -> "FULL"
+                    bestRescueCrossingPlan != null -> "SAME_SIDE_RESCUE"
+                    else -> "NONE"
+                }
                 appendRunLog(
                     "POST_PIPE_CONTROL trackId=$activePipeTrackId frontX=${d.obstacleX} " +
                         "trailingX=$pipeRightEdge birdRight=$birdRightEdge gap=${d.gapTop}..${d.gapBottom} " +
                         "safe=${crossingSafeTop.toInt()}..${crossingSafeBottom.toInt()} " +
-                        "wait180=${crossingWithoutTap.toInt()} flap180=${crossingWithTap.toInt()} " +
-                        "selected=${if (shouldCrossingTap) "FLAP" else "WAIT"}"
+                        "horizon=${crossingHorizon.toInt()}ms waitMiss=${waitWorstMiss.toInt()} " +
+                        "planMiss=${planMiss.toInt()} planN=$selectedTapCount intervals=$selectedSchedule " +
+                        "samples=${waitYs[0].toInt()}/${waitYs[1].toInt()}/${waitYs[2].toInt()} " +
+                        "selected=${if (shouldCrossingTap) "FLAP" else "WAIT"} mode=$planMode " +
+                        "schedules=$crossingSchedulesEvaluated feedbackPending=$tapFeedbackPending"
                 )
                 if (shouldCrossingTap && tap(tapX, tapY, "POST_PIPE", velocity, d.birdY)) {
                     lastAutoTapAt = now
+                    pendingPipeTapAt = 0L
+                    pendingPipeTapTrackId = -1
                     autoTapCount++
                     attemptAutoTaps++
                     attemptFlapDecisions++
                     attemptLastAction = "FLAP_POST_PIPE"
-                    attemptLastDecision = "POST_PIPE_GAP_CORRECTION"
-                    appendRunLog("ACTION_SPACE selected=FLAP reason=POST_PIPE_GAP_CORRECTION")
-                    screenStatus = "ПРОХОЖУ ТРУБУ • корректирую высоту"
+                    attemptLastDecision = if (planMode == "FULL") "POST_PIPE_FULL_PLAN" else "POST_PIPE_SAME_SIDE_RESCUE"
+                    appendRunLog(
+                        "ACTION_SPACE selected=FLAP reason=$attemptLastDecision " +
+                            "planN=$selectedTapCount nextTapOnly=true replanAfterPhysicsFeedback=true"
+                    )
+                    screenStatus = "ПРОХОЖУ ТРУБУ • аварийная коррекция $selectedTapCount"
                 } else {
                     attemptWaitDecisions++
                     attemptLastAction = "WAIT_POST_PIPE"
-                    attemptLastDecision = "POST_PIPE_GAP_HOLD"
+                    attemptLastDecision = when {
+                        tapFeedbackPending -> "POST_PIPE_WAIT_PHYSICS_FEEDBACK"
+                        gestureInFlight.get() -> "POST_PIPE_WAIT_GESTURE"
+                        waitWorstMiss <= 0f -> "POST_PIPE_PATH_SAFE"
+                        bestCrossingPlan == null -> "POST_PIPE_NO_NONWORSENING_RESCUE"
+                        !tapWindowReady -> "POST_PIPE_WAIT_PLANNED_TAP"
+                        else -> "POST_PIPE_TAP_NOT_DISPATCHED"
+                    }
                     val reason = when {
                         tapFeedbackPending -> "WAIT_TAP_FEEDBACK"
                         gestureInFlight.get() -> "GESTURE_IN_FLIGHT"
-                        !crossingNeedsCorrection -> "PREDICTED_PATH_IN_GAP"
-                        !crossingTapSafe -> "TAP_WOULD_LEAVE_GAP"
-                        !crossingTapImproves -> "TAP_NOT_IMPROVING"
-                        else -> "TAP_SPACING_OR_REJECTED"
+                        waitWorstMiss <= 0f -> "PREDICTED_PATH_IN_GAP"
+                        bestCrossingPlan == null -> "NO_NONWORSENING_RESCUE"
+                        !tapWindowReady -> "PLANNED_TAP_IN_${firstTapDelay.toInt()}MS"
+                        else -> "TAP_NOT_DISPATCHED"
                     }
-                    appendRunLog("ACTION_SPACE selected=WAIT reason=$reason")
-                    screenStatus = "ПРОХОЖУ ТРУБУ • удерживаю безопасную траекторию"
+                    appendRunLog("ACTION_SPACE selected=WAIT reason=$reason planN=$selectedTapCount")
+                    screenStatus = "ПРОХОЖУ ТРУБУ • коррекция не нужна / ожидаю окно"
                 }
-            } else if (d.obstacleX >= 0) {
+            }            } else if (d.obstacleX >= 0) {
                 // If a real obstacle is visible but its gap is uncertain, do not mistake it
                 // for the open interval between pipes and do not blindly flap.
                 screenStatus = "ТРУБА x=${d.obstacleX} • уточняю просвет"
@@ -1688,6 +1860,7 @@ class GameAccessibilityService : AccessibilityService() {
         ensureFlapCalibrationLoaded()
         estimatedGravity = 0.0018f
         gravitySamples.clear()
+        flapImpulseSamples.clear()
         resetQLearningAttempt()
         synchronized(tapObservationLock) { pendingTapObservation = null }
         lastSceneSeenAt = 0L
@@ -1888,7 +2061,6 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastFrameWidth = 0
         @Volatile var lastDetectionMs = 0L
         @Volatile var autoTapCount = 0
-        @Volatile var manualTapCount = 0
         @Volatile var lastFrameHeight = 0
         @Volatile var lastBirdX = -1
         @Volatile var lastBirdY = -1

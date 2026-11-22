@@ -28,7 +28,7 @@ class MainActivity : Activity() {
         }
 
         content.addView(TextView(this).apply {
-            text = "Bird Play 0.37.1"
+            text = "Bird Play 0.38.0"
             textSize = 26f
         })
 
