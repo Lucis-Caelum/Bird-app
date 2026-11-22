@@ -1483,12 +1483,21 @@ class GameAccessibilityService : AccessibilityService() {
         val scheduleCreatedAt = SystemClock.elapsedRealtime()
         val dispatchDelayMs = (responseDelayMs - responseLatencyMs).coerceAtLeast(0f)
         var dueAt = scheduleCreatedAt + dispatchDelayMs.toLong()
-        if (scheduledInterceptRunnable != null &&
-            scheduledInterceptTrackId == trackId &&
-            abs((dueAt - scheduledInterceptAt).toFloat()) <= 20f) {
-            return true
+        if (scheduledInterceptRunnable != null && scheduledInterceptTrackId == trackId) {
+            val existingDueAt = scheduledInterceptAt
+            if (dueAt >= existingDueAt - 20L) {
+                appendRunLog(
+                    "INTERCEPT_DISPATCH_KEEP trackId=$trackId existingIn=${(existingDueAt - now).coerceAtLeast(0L)}ms " +
+                        "newIn=${(dueAt - now).coerceAtLeast(0L)}ms reason=NO_POSTPONE"
+                )
+                return true
+            }
+            appendRunLog(
+                "INTERCEPT_DISPATCH_RETIME_EARLIER trackId=$trackId " +
+                    "oldIn=${(existingDueAt - now).coerceAtLeast(0L)}ms newIn=${(dueAt - now).coerceAtLeast(0L)}ms"
+            )
         }
-        cancelScheduledInterceptTap("REPLANNED")
+        cancelScheduledInterceptTap("REPLANNED_EARLIER")
         scheduledInterceptTrackId = trackId
         scheduledInterceptAt = dueAt
         val scheduled = object : Runnable {
@@ -1734,10 +1743,15 @@ class GameAccessibilityService : AccessibilityService() {
 
         if (d.obstacleX >= 0 && d.pipeBounds != "NONE") hasSeenPipeThisAttempt = true
         val pipePassed = trackPipePass(d, fieldWidth, now)
-        if (pipePassed && pendingPipeTapAt > 0L) {
-            appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PIPE_PASSED trackId=$pendingPipeTapTrackId")
-            pendingPipeTapAt = 0L
-            pendingPipeTapTrackId = -1
+        if (pipePassed) {
+            if (scheduledInterceptRunnable != null && scheduledInterceptTrackId == activePipeTrackId) {
+                cancelScheduledInterceptTap("PIPE_PASSED")
+            }
+            if (pendingPipeTapAt > 0L) {
+                appendRunLog("PIPE_TAP_PLAN_CANCEL reason=PIPE_PASSED trackId=$pendingPipeTapTrackId")
+                pendingPipeTapAt = 0L
+                pendingPipeTapTrackId = -1
+            }
         }
 
         val dt = if (previousBirdAt > 0L) (now - previousBirdAt).coerceAtLeast(1L).toFloat() else 0f
@@ -1840,8 +1854,10 @@ class GameAccessibilityService : AccessibilityService() {
                 pipeLeftEdge - birdRightEdge <= overlapGuard && pipeRightEdge >= birdLeftEdge)
         val hasGap = d.obstacleX >= 0 && d.pipeLeft >= 0 && d.pipeRight > d.pipeLeft &&
             d.gapTop >= 0 && d.gapBottom > d.gapTop
-        if (pendingPipeTapAt > 0L && pendingPipeTapTrackId != activePipeTrackId) {
+        if (scheduledInterceptRunnable != null && scheduledInterceptTrackId != activePipeTrackId) {
             cancelScheduledInterceptTap("TRACK_CHANGED")
+        }
+        if (pendingPipeTapAt > 0L && pendingPipeTapTrackId != activePipeTrackId) {
             appendRunLog(
                 "PIPE_TAP_PLAN_CANCEL reason=TRACK_CHANGED oldTrack=$pendingPipeTapTrackId newTrack=$activePipeTrackId"
             )
@@ -2571,14 +2587,37 @@ class GameAccessibilityService : AccessibilityService() {
             else -> "NO_SAFE_MULTI_TAP_PLAN"
         }
         val planValid = searchWindowExists && selectedExists && remainingTapBudget > 0
-        // The selected delay already includes the remaining tap cooldown. Keep its timer
-        // alive while waiting; the dispatch runnable will recheck cooldown and gesture state.
+        // Once committed, preserve the pending action through small frame-to-frame model changes.
+        // A fresh WAIT path that is safe, untrusted geometry, or a different track may invalidate it.
+        val scheduledForActiveTrack = scheduledInterceptRunnable != null &&
+            scheduledInterceptTrackId == activePipeTrackId
+        val waitPathClearlySafe = waitWorstMiss <= missThreshold && !earlyCenterCorrectionNeeded
+        val retainScheduledCommitment = scheduledForActiveTrack && gapTrusted && safeWindowValid &&
+            distanceWindow && !waitPathClearlySafe
         val shouldScheduleTap = planValid
 
         if (!planValid) {
-            if (scheduledInterceptRunnable != null) cancelScheduledInterceptTap("PLAN_NO_LONGER_VALID")
-            if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId) {
-                appendRunLog("PIPE_TAP_PLAN_CANCEL reason=INTERCEPT_NO_LONGER_VALID trackId=$activePipeTrackId")
+            if (scheduledForActiveTrack && retainScheduledCommitment) {
+                appendRunLog(
+                    "INTERCEPT_PLAN_RETAINED trackId=$activePipeTrackId reason=NO_NEW_PLAN_WAIT_PATH_UNSAFE " +
+                        "waitMiss=${waitWorstMiss.toInt()} threshold=${missThreshold.toInt()} " +
+                        "dispatchIn=${(scheduledInterceptAt - now).coerceAtLeast(0L)}ms"
+                )
+            } else if (scheduledForActiveTrack) {
+                val cancelReason = when {
+                    !gapTrusted -> "GAP_UNTRUSTED"
+                    !safeWindowValid -> "SAFE_WINDOW_INVALID"
+                    !distanceWindow -> "PIPE_OUT_OF_RANGE"
+                    waitPathClearlySafe -> "WAIT_PATH_CONFIRMED_SAFE"
+                    else -> "PLAN_NO_LONGER_VALID"
+                }
+                cancelScheduledInterceptTap(cancelReason)
+            }
+            if (pendingPipeTapAt > 0L && pendingPipeTapTrackId == activePipeTrackId &&
+                !retainScheduledCommitment) {
+                appendRunLog(
+                    "PIPE_TAP_PLAN_CANCEL reason=INTERCEPT_NO_LONGER_VALID trackId=$activePipeTrackId"
+                )
                 pendingPipeTapAt = 0L
                 pendingPipeTapTrackId = -1
             }
