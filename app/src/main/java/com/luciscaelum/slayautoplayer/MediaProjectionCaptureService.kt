@@ -89,11 +89,13 @@ class MediaProjectionCaptureService : Service() {
                 lastFrameAt = now
                 try {
                     val bitmap = imageToBitmap(image) ?: return@setOnImageAvailableListener
-                    val top = (bitmap.height * HEADER_CROP_FRACTION).toInt().coerceIn(1, bitmap.height - 1)
-                    val field = Bitmap.createBitmap(bitmap, 0, top, bitmap.width, bitmap.height - top)
-                    bitmap.recycle()
-                    GameAccessibilityService.processCapturedFrame(field, top, screenWidth, screenHeight)
-                    field.recycle()
+                    try {
+                        val top = (bitmap.height * HEADER_CROP_FRACTION).toInt()
+                            .coerceIn(1, bitmap.height - 1)
+                        GameAccessibilityService.processCapturedFrame(bitmap, top, screenWidth, screenHeight)
+                    } finally {
+                        if (!bitmap.isRecycled) bitmap.recycle()
+                    }
                 } catch (e: Exception) {
                     GameAccessibilityService.screenStatus = "Ошибка видеокадра: ${e.javaClass.simpleName}"
                 } finally {
