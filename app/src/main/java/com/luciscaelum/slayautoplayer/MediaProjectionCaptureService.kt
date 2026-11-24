@@ -6,11 +6,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
+import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
-import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -18,20 +17,22 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
-import android.os.SystemClock
-import android.content.pm.ServiceInfo
-import kotlin.math.max
+import android.os.Process
 
+/**
+ * Screen capture. v0.50: NO throttling and NO Bitmap copies.
+ *
+ * Every frame the system produces is handed to [GameAccessibilityService.processFrame] together with
+ * its real capture time (Image.timestamp, same clock as System.nanoTime()). The listener runs on one
+ * dedicated thread; if analysis is slower than the screen refresh, acquireLatestImage() silently
+ * drops the stale frames, so the controller always works on the newest picture.
+ */
 class MediaProjectionCaptureService : Service() {
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
     private var worker: HandlerThread? = null
     private var workerHandler: Handler? = null
-    private var lastFrameAt = 0L
-    private var screenWidth = 0
-    private var screenHeight = 0
-    private var density = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -49,7 +50,8 @@ class MediaProjectionCaptureService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-        worker = HandlerThread("BirdPlayFrames").also { it.start() }
+        // Frame thread must not compete with UI threads for CPU time.
+        worker = HandlerThread("BirdPlayFrames", Process.THREAD_PRIORITY_URGENT_DISPLAY).also { it.start() }
         workerHandler = Handler(worker!!.looper)
     }
 
@@ -66,9 +68,9 @@ class MediaProjectionCaptureService : Service() {
         }
         try {
             val metrics = resources.displayMetrics
-            screenWidth = metrics.widthPixels
-            screenHeight = metrics.heightPixels
-            density = metrics.densityDpi
+            val screenWidth = metrics.widthPixels
+            val screenHeight = metrics.heightPixels
+            val density = metrics.densityDpi
             val manager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             projection = manager.getMediaProjection(resultCode, data)
             projection?.registerCallback(object : MediaProjection.Callback() {
@@ -76,26 +78,18 @@ class MediaProjectionCaptureService : Service() {
                     stopSelf()
                 }
             }, workerHandler)
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
             imageReader?.setOnImageAvailableListener({ reader ->
-                val now = SystemClock.elapsedRealtime()
-                val frameInterval = if (GameAccessibilityService.monitoring) FRAME_INTERVAL_MS else PREVIEW_INTERVAL_MS
-                if (now - lastFrameAt < frameInterval) {
-                    val skipped = reader.acquireLatestImage()
-                    skipped?.close()
-                    return@setOnImageAvailableListener
-                }
-                val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                lastFrameAt = now
+                val image = try { reader.acquireLatestImage() } catch (e: Exception) { null }
+                    ?: return@setOnImageAvailableListener
                 try {
-                    val bitmap = imageToBitmap(image) ?: return@setOnImageAvailableListener
-                    try {
-                        val top = (bitmap.height * HEADER_CROP_FRACTION).toInt()
-                            .coerceIn(1, bitmap.height - 1)
-                        GameAccessibilityService.processCapturedFrame(bitmap, top, screenWidth, screenHeight)
-                    } finally {
-                        if (!bitmap.isRecycled) bitmap.recycle()
-                    }
+                    val arrivalMs = System.nanoTime() / 1e6
+                    var captureMs = image.timestamp / 1e6
+                    val age = arrivalMs - captureMs
+                    // Image.timestamp should share System.nanoTime()'s clock. If it does not on some device,
+                    // fall back to "arrival minus a typical pipeline delay" instead of trusting nonsense.
+                    if (age < 0.0 || age > 400.0) captureMs = arrivalMs - FALLBACK_AGE_MS
+                    GameAccessibilityService.processFrame(image, captureMs, screenWidth, screenHeight)
                 } catch (e: Exception) {
                     GameAccessibilityService.screenStatus = "Ошибка видеокадра: ${e.javaClass.simpleName}"
                 } finally {
@@ -113,21 +107,6 @@ class MediaProjectionCaptureService : Service() {
             stopSelf()
         }
         return START_NOT_STICKY
-    }
-
-    private fun imageToBitmap(image: Image): Bitmap? {
-        val plane = image.planes.firstOrNull() ?: return null
-        val pixelStride = plane.pixelStride
-        val rowStride = plane.rowStride
-        val paddedWidth = rowStride / pixelStride
-        val padded = Bitmap.createBitmap(paddedWidth, image.height, Bitmap.Config.ARGB_8888)
-        val buffer = plane.buffer
-        buffer.rewind()
-        padded.copyPixelsFromBuffer(buffer)
-        if (paddedWidth == image.width) return padded
-        val cropped = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
-        padded.recycle()
-        return cropped
     }
 
     private fun createNotificationChannel() {
@@ -151,8 +130,6 @@ class MediaProjectionCaptureService : Service() {
         const val EXTRA_RESULT_DATA = "birdplay.resultData"
         private const val CHANNEL_ID = "bird_play_capture"
         private const val NOTIFICATION_ID = 7321
-        private const val FRAME_INTERVAL_MS = 80L
-        private const val PREVIEW_INTERVAL_MS = 450L
-        private const val HEADER_CROP_FRACTION = 0.117f
+        private const val FALLBACK_AGE_MS = 20.0
     }
 }

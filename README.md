@@ -3,14 +3,16 @@
 > **Article ID:** BRD-001  
 > **Author:** ChatGPT (OpenAI)  
 > **Document status:** Maintained project index  
-> **Current app version:** 0.43.0 (versionCode 56)
+> **Current app version:** 0.50.0 (versionCode 57) — controller rewritten, see [docs/REWRITE_0.50.md](docs/REWRITE_0.50.md)
 
 Bird Play is an Android prototype that observes a Flappy-style game through screen capture, detects the bird and pipe gaps, predicts the bird's vertical trajectory, and sends touch gestures through Android Accessibility. The objective is to pass as many pipe pairs as possible while keeping the game visible and allowing immediate manual takeover.
 
 ## Repository
 
 - GitHub: https://github.com/Lucis-Caelum/Bird-app
-- Main source: `app/src/main/java/com/luciscaelum/slayautoplayer/GameAccessibilityService.kt`
+- Control core (pure Kotlin, testable without a phone): `app/src/main/java/com/luciscaelum/slayautoplayer/core/`
+- Android shell: `GameAccessibilityService.kt` (taps, log), `MediaProjectionCaptureService.kt` (frames)
+- Offline simulator: `tools/simulator/`
 - APK download branch: `apk-download`
 - Current APK: https://raw.githubusercontent.com/Lucis-Caelum/Bird-app/apk-download/Bird-Play.apk
 
@@ -19,9 +21,12 @@ Bird Play is an Android prototype that observes a Flappy-style game through scre
 - [Project overview](docs/PROJECT_OVERVIEW.md)
 - [Goals and development plan](docs/GOALS_AND_ROADMAP.md)
 - [Technical findings and known problems](docs/TECHNICAL_FINDINGS.md)
+- [Version 0.50 rewrite: what changed and why](docs/REWRITE_0.50.md)
 - [Latest test session log — 2026-11-22 17:36:05](docs/SESSION_LOG_2026-11-22_17-36-05.md)
 
 ## Current status at a glance
+
+**0.50.0** replaces the Q-learning/heuristic controller with a model-based one (physics learned online, forward simulation, per-pipe tracking, capture-time timestamps). It is verified only in simulation so far; it has NOT been run on a device. The text below describes the old 0.43.0 behaviour that motivated the rewrite.
 
 Version 0.43.0 fixed an execution-continuity problem: a queued intercept tap should not be discarded merely because a new frame briefly fails to produce another plan. A pending tap for the same tracked pipe is retained when the geometry is trusted and waiting is still predicted to be unsafe; the deadline can be moved earlier but not postponed.
 

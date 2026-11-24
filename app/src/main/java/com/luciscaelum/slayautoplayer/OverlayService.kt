@@ -171,8 +171,7 @@ class OverlayService : Service() {
         val gap = "${GameAccessibilityService.lastGapTop}..${GameAccessibilityService.lastGapBottom}"
         val tap = GameAccessibilityService.lastTapStatus
         val counts = "A${GameAccessibilityService.autoTapCount} • $tap"
-        val learning = "Q${GameAccessibilityService.learnedStateCount} • rev ${GameAccessibilityService.learnedRevision} • P${GameAccessibilityService.learnedPipeCount}"
-        status?.text = "BIRD PLAY • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts\nLEARN $learning\nVOL− = STOP"
+        status?.text = "BIRD PLAY 0.50 • $state\n$detail\n$bird • $pipe\nG $gap\nTAP $counts\nVOL− = STOP"
     }
 
     override fun onDestroy() {
