@@ -21,7 +21,14 @@ class Decision(
  * Time is always in milliseconds on ONE monotonic axis: [tCap] = when the frame was captured,
  * [tNow] = when the decision is made (tNow - tCap = pipeline delay that the controller compensates).
  */
-class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPhysics?) {
+class AutoPilot(
+    private val fieldW: Int,
+    private val fieldH: Int,
+    saved: SavedPhysics?,
+    /** Hit box = detected bird box * these factors (the detector sees only the blue hoodie, not the rocket). */
+    private val hitScaleW: Double = DEFAULT_HIT_SCALE_W,
+    private val hitScaleH: Double = DEFAULT_HIT_SCALE_H
+) {
     private val W = fieldW.toDouble()
     private val H = fieldH.toDouble()
 
@@ -52,16 +59,27 @@ class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPh
     val vf: Double get() = phys.vf
     val latency: Double get() = phys.L
     val speed: Double get() = pipes.speed
+    /** Usual bird position/width for FrameAnalyzer's hint (NaN until known). */
+    val birdXHint: Double get() = if (birdXs.size >= 3) medianOf(birdXs) else -1.0
+    val birdWHint: Double get() = if (birdWs.size >= 3) medianOf(birdWs) else 0.0
+
+    // closest approach to a pipe edge during the last 2 s, to explain deaths in the log
+    private class Margin(val t: Double, val v: Double, val side: String, val y: Double, val gt: Double, val gb: Double)
+    private val margins = ArrayList<Margin>()
 
     fun exportPhysics(): SavedPhysics? {
-        if (phys.flapSampleCount < 2 || phys.gSampleCount < 3) return null
+        if (phys.flapSampleCount < 1 || phys.gSampleCount < 1) return null
         return SavedPhysics(phys.g / H, phys.vf / H, phys.L, pipes.speed / W)
     }
 
     /** Call when the game scene disappears (game over / menu). Returns a one-line summary or null. */
     private fun endAttempt(tNow: Double): String {
         val dur = (tNow - attemptStartMs) / 1000.0
-        return "ATTEMPT_END attempt=$attempt dur=${"%.1f".format(dur)}s passed=${pipes.passedCount} taps=$attemptTaps " +
+        var worst: Margin? = null
+        for (m in margins) if (worst == null || m.v < worst.v) worst = m
+        val why = if (worst == null) "none" else
+            "${worst.side} margin=${worst.v.toInt()}px y=${worst.y.toInt()} gap=${worst.gt.toInt()}..${worst.gb.toInt()} ${(tNow - worst.t).toInt()}ms_before_end"
+        return "ATTEMPT_END attempt=$attempt dur=${"%.1f".format(dur)}s passed=${pipes.passedCount} taps=$attemptTaps nearEdge=[$why] " +
             "g=${"%.5f".format(phys.g)} vf=${"%.3f".format(phys.vf)} L=${phys.L.toInt()} speed=${"%.3f".format(pipes.speed)}"
     }
 
@@ -82,7 +100,7 @@ class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPh
             pipes.reset()
             cal.resetAttempt()
             taps.clear()
-            birdXs.clear(); birdWs.clear(); birdHs.clear()
+            birdXs.clear(); birdWs.clear(); birdHs.clear(); margins.clear()
             event = "ATTEMPT_START attempt=$attempt g=${"%.5f".format(phys.g)} vf=${"%.3f".format(phys.vf)} " +
                 "L=${phys.L.toInt()} speed=${"%.3f".format(pipes.speed)} field=${fieldW}x$fieldH"
         }
@@ -109,7 +127,19 @@ class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPh
         val bx = medianOf(birdXs)
         val bw = max(medianOf(birdWs), 0.03 * W)
         val bh = max(medianOf(birdHs), 0.03 * H)
-        val ctl = Controller(W, H, bx - 0.5 * bw, bx + 0.5 * bw, 0.5 * bh)
+        val halfW = 0.5 * bw * hitScaleW
+        val halfH = 0.5 * bh * hitScaleH
+        val ctl = Controller(W, H, bx - halfW, bx + halfW, halfH)
+        // margin to the pipe the bird is level with (negative = touching)
+        for (p in obs) {
+            if (p.left <= bx + halfW && p.right >= bx - halfW) {
+                val mt = (ye - halfH) - p.top
+                val mb = p.bottom - (ye + halfH)
+                margins.add(if (mt < mb) Margin(tCap, mt, "TOP", ye, p.top, p.bottom) else Margin(tCap, mb, "BOTTOM", ye, p.top, p.bottom))
+                break
+            }
+        }
+        while (margins.isNotEmpty() && tCap - margins[0].t > 2000.0) margins.removeAt(0)
 
         val pending = ArrayList<Double>(4)
         for (i in max(0, taps.size - 4) until taps.size) {
@@ -118,7 +148,7 @@ class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPh
         }
         val lastDisp = if (taps.isNotEmpty()) taps.last() - tCap else null
         val age = min(250.0, max(3.0, tNow - tCap))
-        val vis = obs.filter { it.right > bx - 0.5 * bw - 60.0 }
+        val vis = obs.filter { it.right > bx - halfW - 60.0 }
         val plan = ctl.decide(ye, ve, age, vis, pipes.speed, phys, pending, lastDisp)
         if (plan.tap) {
             taps.add(tNow)
@@ -138,9 +168,11 @@ class AutoPilot(private val fieldW: Int, private val fieldH: Int, saved: SavedPh
     companion object {
         // Ballpark values from the v0.43 logs (field height ~2300 px, flap speed ~ -1.9 px/ms).
         // They are only priors: the calibrator refines them online and the result is persisted.
-        const val DEFAULT_G_PER_H = 1.6e-6
+        const val DEFAULT_G_PER_H = 5.0e-6
         const val DEFAULT_VF_PER_H = -7.5e-4
         const val DEFAULT_L = 90.0
+        const val DEFAULT_HIT_SCALE_W = 1.3
+        const val DEFAULT_HIT_SCALE_H = 1.3
         const val DEFAULT_SPEED_PER_W = 0.0006
     }
 }

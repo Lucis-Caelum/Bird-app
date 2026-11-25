@@ -12,15 +12,18 @@ import kotlin.math.max
 class SimCfg(
     val H: Double = 2800.0,
     val W: Double = 1440.0,
-    val g: Double = 0.0045,
-    val vf: Double = -1.55,
+    val g: Double = 0.017,
+    val vf: Double = -2.4,
+    val bhw: Double = 94.0,
+    val bhh: Double = 160.0,
+    val birdXFrac: Double = 0.32,
     val L: Double = 110.0,
     val LJit: Double = 12.0,
     val speed: Double = 0.85,
     val spacing: Double = 1100.0,
-    val pipeW: Double = 200.0,
-    val gapH: Double = 780.0,
-    val gapVar: Double = 60.0,
+    val pipeW: Double = 216.0,
+    val gapH: Double = 616.0,
+    val gapVar: Double = 40.0,
     val gapLo: Double = 0.30,
     val gapHi: Double = 0.70,
     val frame: Double = 16.7,
@@ -48,9 +51,9 @@ fun runSim(seed: Long, c: SimCfg): SimResult {
     fun uni(a: Double, b: Double) = a + (b - a) * rng.nextDouble()
     val H = c.H
     val W = c.W
-    val bx = 0.26 * W
-    val bhw = 50.0
-    val bhh = 60.0
+    val bx = c.birdXFrac * W
+    val bhw = c.bhw
+    val bhh = c.bhh
     var y = 0.45 * H
     var v = 0.0
     var t = 0.0
@@ -161,6 +164,7 @@ fun runSim(seed: Long, c: SimCfg): SimResult {
 }
 
 fun main(args: Array<String>) {
+    System.getenv("BOT_EXTRA")?.let { BOT_EXTRA = it.toDouble() }
     if (args.isNotEmpty() && args[0] == "renderseed") { val r = runRender(args[1].toLong(), args[2].toInt()); println("RESULT passed=${r.passed} death=${r.death}"); return }
     if (args.isNotEmpty() && args[0] == "render") { mainRender(args.drop(1).toTypedArray()); return }
     val n = if (args.isNotEmpty()) args[0].toInt() else 40
@@ -170,7 +174,7 @@ fun main(args: Array<String>) {
     var early = 0
     val t0 = System.currentTimeMillis()
     for (s in 0 until n) {
-        val r = runSim(s.toLong(), SimCfg())
+        val r = runSim(s.toLong(), SimCfg(g = (System.getenv("SIM_G") ?: "0.017").toDouble(), bhh = (System.getenv("SIM_BHH") ?: "160").toDouble(), bhw = (System.getenv("SIM_BHW") ?: "94").toDouble(), gErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.6 to 1.6, vfErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.7 to 1.4, L0 = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0, maxPipes = (System.getenv("SIM_PIPES") ?: "40").toInt()))
         res.add(r.passed)
         deaths.merge(r.death, 1, Int::plus)
         if (r.passed >= 40) full++

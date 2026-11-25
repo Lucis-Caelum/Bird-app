@@ -28,21 +28,21 @@ private class RPend(val tDec: Double, val ts: Double, val scene: FrameScene)
 fun runRender(seed: Long, maxPipes: Int, noise: Boolean = true): SimResult {
     val rng = Random(seed)
     fun uni(a: Double, b: Double) = a + (b - a) * rng.nextDouble()
-    val g = 0.00225
-    val vf = -0.80
+    val g = (System.getenv("SIM_G") ?: "0.0085").toDouble()
+    val vf = -1.2
     val L = 105.0
     val speed = 0.425
-    val pipeW = 100.0
-    val bx = 0.26 * FW
-    val bhw = 25.0
-    val bhh = 30.0
+    val pipeW = 108.0
+    val bx = 0.32 * FW
+    val bhw = (System.getenv("SIM_RBHW") ?: "35").toDouble()
+    val bhh = (System.getenv("SIM_RBHH") ?: "55").toDouble()
     var y = 0.45 * FH
     var v = 0.0
     var t = 0.0
     val pipes = ArrayList<RPipe>()
     fun spawn(x: Double) {
         val c = uni(0.30, 0.70) * FH
-        val gh = 390.0 + uni(-30.0, 30.0)
+        val gh = 308.0 + uni(-20.0, 20.0)
         pipes.add(RPipe(x, c - gh / 2, c + gh / 2))
     }
     spawn(FW * 1.25)
@@ -52,12 +52,12 @@ fun runRender(seed: Long, maxPipes: Int, noise: Boolean = true): SimResult {
     val analyzer = FrameAnalyzer()
     // deliberately wrong priors: autopilot must learn
     val saved = SavedPhysics(
-        gPerH = AutoPilot.DEFAULT_G_PER_H * uni(0.7, 1.4),
+        gPerH = (g / FH) * (if (System.getenv("SIM_GOOD") != null) uni(0.97, 1.03) else uni(0.7, 1.4)),
         vfPerH = AutoPilot.DEFAULT_VF_PER_H * uni(0.8, 1.2),
-        latencyMs = 90.0,
+        latencyMs = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0,
         speedPerW = AutoPilot.DEFAULT_SPEED_PER_W * uni(0.8, 1.2)
     )
-    val pilot = AutoPilot(FW, FH, saved)
+    val pilot = AutoPilot(FW, FH, saved, 1.0, 1.0)
     val effects = ArrayList<Double>()
     var passed = 0
     var death = "ALIVE"
@@ -129,7 +129,7 @@ fun runRender(seed: Long, maxPipes: Int, noise: Boolean = true): SimResult {
             val sc = p.scene
             println("t=${t.toInt()} trueY=${y.toInt()} v=${"%.2f".format(v)} bird=${sc.birdFound}:${sc.birdX.toInt()},${sc.birdY.toInt()} pipes=" +
                 sc.pipes.joinToString(";") { "${it.left.toInt()}-${it.right.toInt()}:${it.top.toInt()}..${it.bottom.toInt()}" } +
-                " truth=" + pipes.joinToString(";") { "${it.left.toInt()}:${it.top.toInt()}..${it.bottom.toInt()}" } + " | " + (d?.line ?: "-") + (ev?.let { " EV:$it" } ?: ""))
+                " truth=" + pipes.joinToString(";") { "${it.left.toInt()}:${it.top.toInt()}..${it.bottom.toInt()}" } + " g=${"%.4f".format(pilot.g)} vf=${"%.2f".format(pilot.vf)} L=${pilot.latency.toInt()} | " + (d?.line ?: "-") + (ev?.let { " EV:$it" } ?: ""))
         }
         if (d != null && d.tap) {
             nTaps++

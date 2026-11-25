@@ -8,6 +8,9 @@ const val HORIZON = 820.0
 const val MIN_TAP_GAP = 110.0
 const val BIAS = 0.38
 
+/** Extra safety (fraction of gap height) kept above the lower pipe: falling errors are the expensive ones. */
+var BOT_EXTRA = 0.06
+
 /** One observed pipe pair (px). top = bottom edge of the upper pipe, bottom = top edge of the lower pipe. */
 class PipeObs(
     val left: Double,
@@ -70,6 +73,7 @@ class Controller(
     private val halfH: Double
 ) {
     private fun pipeMargin(p: PipeObs): Double = 0.06 * (p.bottom - p.top) + 8.0 + p.spread
+    private fun botMargin(p: PipeObs): Double = pipeMargin(p) + BOT_EXTRA * (p.bottom - p.top)
 
     private class Constraint(val lo: Double, val hi: Double, val active: PipeObs?)
 
@@ -87,7 +91,7 @@ class Controller(
             if (l <= birdRight + xm) {
                 val m = pipeMargin(p)
                 lo = max(lo, p.top + m + halfH)
-                hi = min(hi, p.bottom - m - halfH)
+                hi = min(hi, p.bottom - botMargin(p) - halfH)
             } else break
         }
         return Constraint(lo, hi, active)
@@ -102,7 +106,7 @@ class Controller(
         } else {
             val m = pipeMargin(active)
             val top = active.top + m + halfH
-            val bot = active.bottom - m - halfH
+            val bot = active.bottom - botMargin(active) - halfH
             var nxt: PipeObs? = null
             var seen = false
             for (p in pipes) {

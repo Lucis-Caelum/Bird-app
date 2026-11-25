@@ -25,7 +25,7 @@ class Physics(val g0: Double, val vf0: Double, val L0: Double) {
     val flapSampleCount: Int get() = lSamples.size
 
     fun addG(v: Double) {
-        if (!(v >= 0.35 * g0 && v <= 3.0 * g0)) return
+        if (!(v >= 0.2 * g0 && v <= 6.0 * g0)) return
         gSamples.add(v)
         while (gSamples.size > 15) gSamples.removeAt(0)
         g = medianOf(gSamples)
@@ -130,10 +130,11 @@ class Calibrator(private val phys: Physics) {
             val t0 = tr.t[from]
             val t1 = tr.t[n - 1]
             if (t1 - t0 < 170.0) continue
+            // pure ballistic flight: no tap takes effect inside the window (effect = dispatch + latency)
             var tapped = false
-            for (td in allTaps) if (td >= t0 - 320.0 && td <= t1) {
-                tapped = true
-                break
+            for (td in allTaps) {
+                val te = td + phys.L
+                if (te >= t0 - 45.0 && te <= t1 + 25.0) { tapped = true; break }
             }
             if (tapped) continue
             val q = fitQuadratic(tr.t, tr.y, from, n, t1)
@@ -270,6 +271,5 @@ class Calibrator(private val phys: Physics) {
         val worse = min(cost(L - 30.0, vf, G), cost(L + 30.0, vf, G))
         if (worse < best * 1.35 + 20.0 * cnt) return
         phys.addFlap(vf, L)
-        if (phys.gSampleCount < 3) phys.addG(G)
     }
 }

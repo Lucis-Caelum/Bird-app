@@ -1,11 +1,13 @@
 package com.luciscaelum.slayautoplayer
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.ViewGroup
-import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,76 +20,52 @@ class LogActivity : Activity() {
     private val saveRequest = 4208
     private lateinit var logText: TextView
     private lateinit var summaryText: TextView
+    private lateinit var attemptsText: TextView
     private var currentLog = ""
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int) = UiKit.dp(this, value)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(18), dp(16), dp(16))
+            setBackgroundColor(UiKit.BG)
+            setPadding(dp(16), dp(22), dp(16), dp(14))
         }
-
-        root.addView(TextView(this).apply {
-            text = "Журнал игровых попыток"
-            textSize = 23f
-            setTextColor(0xFF18202A.toInt())
+        root.addView(UiKit.text(this, "Журнал попыток", 24f, UiKit.TEXT, true))
+        root.addView(UiKit.text(this, "Сохрани или скопируй журнал после серии игр и пришли его разработчику для настройки.", 12.5f, UiKit.TEXT_DIM).apply {
+            setPadding(0, dp(2), 0, dp(10))
         })
 
-        root.addView(TextView(this).apply {
-            text = "Подробная диагностика текущей сессии. Обнови журнал после серии игр и сохрани его как TXT в выбранную папку телефона."
-            textSize = 14f
-            setTextColor(0xFF4B5563.toInt())
-            setPadding(0, dp(7), 0, dp(9))
-        })
-
-        summaryText = TextView(this).apply {
-            textSize = 13f
-            setTextColor(0xFF245B8F.toInt())
-            setPadding(0, dp(4), 0, dp(8))
-        }
-        root.addView(summaryText)
+        val card = UiKit.card(this)
+        summaryText = UiKit.text(this, "", 14f, UiKit.TEXT, true)
+        attemptsText = UiKit.text(this, "", 12f, UiKit.TEXT_DIM).apply { setPadding(0, dp(4), 0, 0) }
+        card.addView(summaryText)
+        card.addView(attemptsText)
+        root.addView(card, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(10) })
 
         val actions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun actionButton(label: String, action: () -> Unit) {
-            val button = Button(this).apply {
-                text = label
-                isAllCaps = false
-                textSize = 12f
-                setOnClickListener { action() }
-            }
-            actions.addView(button, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(4)
-            })
+        fun action(label: String, primary: Boolean, run: () -> Unit) {
+            actions.addView(UiKit.button(this, label, primary, 42, run),
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginEnd = dp(6) })
         }
-        actionButton("Обновить") { refreshLog() }
-        actionButton("Сохранить TXT") { beginSave() }
+        action("Обновить", false) { refreshLog() }
+        action("Скопировать", false) { copyLog() }
+        action("Сохранить TXT", true) { beginSave() }
         root.addView(actions)
 
         logText = TextView(this).apply {
             textSize = 10.5f
             typeface = android.graphics.Typeface.MONOSPACE
-            setTextColor(0xFFE7EDF5.toInt())
-            setBackgroundColor(0xFF18212B.toInt())
+            setTextColor(0xFFD7E0EC.toInt())
+            background = UiKit.rounded(this@LogActivity, 0xFF0A0E14.toInt(), 12, UiKit.CARD_STROKE, 1)
             setPadding(dp(10), dp(10), dp(10), dp(10))
             setTextIsSelectable(true)
         }
-        val logScroll = ScrollView(this).apply {
-            isFillViewport = true
-            addView(logText)
-        }
-        root.addView(logScroll, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
-        ).apply { topMargin = dp(8) })
+        root.addView(ScrollView(this).apply { isFillViewport = true; addView(logText) },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(10); bottomMargin = dp(8) })
 
-        root.addView(Button(this).apply {
-            text = "Назад"
-            isAllCaps = false
-            setOnClickListener { finish() }
-        })
-
+        root.addView(UiKit.button(this, "Назад", false, 42) { finish() })
         setContentView(root)
         refreshLog()
     }
@@ -96,9 +74,21 @@ class LogActivity : Activity() {
         currentLog = GameAccessibilityService.getRunLog(this)
         logText.text = if (currentLog.isBlank()) "Журнал пока пуст." else currentLog
         val started = Regex("ATTEMPT_START\\s+attempt=").findAll(currentLog).count()
-        val ended = Regex("ATTEMPT_END\\s+attempt=").findAll(currentLog).count()
-        val session = if (GameAccessibilityService.monitoring) "мониторинг активен" else "мониторинг остановлен"
-        summaryText.text = "Попыток начато: $started  •  завершено/прервано: $ended  •  $session"
+        val results = Regex("ATTEMPT_END attempt=(\\d+) dur=([0-9.]+)s passed=(\\d+)").findAll(currentLog).toList()
+        val best = results.maxOfOrNull { it.groupValues[3].toInt() } ?: 0
+        val session = if (GameAccessibilityService.monitoring) "автопилот работает" else "автопилот остановлен"
+        summaryText.text = "Попыток: $started  ·  лучший результат: $best труб"
+        attemptsText.text = (if (results.isEmpty()) "Завершённых попыток пока нет" else
+            "Последние: " + results.takeLast(6).joinToString("  ") { "#${it.groupValues[1]}→${it.groupValues[3]}" }) + "\n$session"
+    }
+
+    private fun copyLog() {
+        refreshLog()
+        val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        // clipboard transactions are size-limited: copy the tail, which holds the latest attempts
+        val tail = if (currentLog.length > 200_000) currentLog.takeLast(200_000) else currentLog
+        cm.setPrimaryClip(ClipData.newPlainText("Bird Play log", tail))
+        Toast.makeText(this, "Журнал скопирован", Toast.LENGTH_SHORT).show()
     }
 
     private fun beginSave() {
@@ -125,7 +115,7 @@ class LogActivity : Activity() {
             val output = contentResolver.openOutputStream(uri, "wt")
                 ?: throw IllegalStateException("Не удалось открыть файл для записи")
             output.bufferedWriter(Charsets.UTF_8).use { writer -> writer.write(currentLog) }
-            Toast.makeText(this, "Журнал сохранён в выбранное место", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Журнал сохранён", Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             Toast.makeText(this, "Ошибка сохранения: " + e.javaClass.simpleName, Toast.LENGTH_LONG).show()
         }

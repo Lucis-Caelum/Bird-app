@@ -25,11 +25,14 @@ class FrameScene(
  */
 class FrameAnalyzer {
     private var colPurple = IntArray(0)
-    private var colCrystal = IntArray(0)
     private var cand = BooleanArray(0)
     private var vertical = BooleanArray(0)
     private var birdCols = IntArray(0)
     private var birdRows = IntArray(0)
+
+    /** Usual horizontal position / width of the bird (set by the caller once known); <0 = unknown. */
+    @Volatile var birdHintX = -1.0
+    @Volatile var birdHintW = 0.0
 
     fun analyze(px: IntBuffer, stridePx: Int, w: Int, frameH: Int, cropTop: Int): FrameScene {
         val top = cropTop.coerceIn(0, frameH - 1)
@@ -61,12 +64,11 @@ class FrameAnalyzer {
         if (scoreOrange <= 90) return FrameScene(false, note = "меню / отсчёт")
 
         if (colPurple.size < sampleW) {
-            colPurple = IntArray(sampleW); colCrystal = IntArray(sampleW)
+            colPurple = IntArray(sampleW)
             cand = BooleanArray(sampleW); birdCols = IntArray(sampleW)
         }
         if (vertical.size < sampleH) { vertical = BooleanArray(sampleH); birdRows = IntArray(sampleH) }
         java.util.Arrays.fill(colPurple, 0, sampleW, 0)
-        java.util.Arrays.fill(colCrystal, 0, sampleW, 0)
         java.util.Arrays.fill(birdCols, 0, sampleW, 0)
         java.util.Arrays.fill(birdRows, 0, sampleH, 0)
 
@@ -98,29 +100,75 @@ class FrameAnalyzer {
                 }
                 if (scanPipe) {
                     if (isPurple(r, g, b)) colPurple[sx]++
-                    if (isCrystal(r, g, b)) colCrystal[sx]++
                 }
             }
         }
 
-        // bird bbox from column/row histograms (needs >=2 samples, ignores lone stray pixels)
-        var bx0 = -1; var bx1 = -1; var by0 = -1; var by1 = -1
-        if (birdPixels >= 24) {
-            for (sx in 0 until sampleW) if (birdCols[sx] >= 2) { if (bx0 < 0) bx0 = sx; bx1 = sx }
-            for (sy in 0 until sampleH) if (birdRows[sy] >= 2) { if (by0 < 0) by0 = sy; by1 = sy }
-        }
+        // bird = the biggest connected cluster of "bird" pixels (so bonus crystals / potions that are
+        // bluish do not inflate the box); when the bird's usual x is known, clusters far from it are ignored
         var birdFound = false
         var birdX = -1.0
         var birdY = -1.0
         var birdW = 0.0
         var birdH = 0.0
-        if (bx0 >= 0 && by0 >= 0) {
-            birdW = ((bx1 - bx0) * step).toDouble()
-            birdH = ((by1 - by0) * step).toDouble()
-            if (birdW >= 12 && birdH >= 18) {
-                birdFound = true
-                birdX = (bx0 + bx1) * step / 2.0
-                birdY = (by0 + by1) * step / 2.0
+        if (birdPixels >= 24) {
+            var bestC0 = -1; var bestC1 = -1; var bestCount = 0
+            var c0 = -1; var count = 0; var gapCols = 0
+            for (sx in 0..sampleW) {
+                val on = sx < sampleW && birdCols[sx] >= 2
+                if (on) {
+                    if (c0 < 0) c0 = sx
+                    count += birdCols[sx]; gapCols = 0
+                    if (sx == sampleW - 1) gapCols = 99
+                }
+                if (c0 >= 0 && (!on)) {
+                    gapCols++
+                    if (gapCols > 2 || sx >= sampleW - 1) {
+                        val c1 = sx - gapCols + 1 - 1
+                        val cx = (c0 + c1) * step / 2.0
+                        val okHint = birdHintX < 0 || kotlin.math.abs(cx - birdHintX) <= max(0.9 * birdHintW, 90.0)
+                        if (okHint && count > bestCount) { bestCount = count; bestC0 = c0; bestC1 = c1 }
+                        c0 = -1; count = 0; gapCols = 0
+                    }
+                }
+            }
+            if (bestC0 >= 0) {
+                java.util.Arrays.fill(birdRows, 0, sampleH, 0)
+                for (sy in 0 until sampleH) {
+                    val yy = sy * step
+                    if (yy < birdY0 || yy >= birdY1) continue
+                    val rowBase = (top + yy) * stridePx
+                    for (sx in bestC0..bestC1) {
+                        val c = px.get(rowBase + sx * step)
+                        val r = c and 255
+                        val g = (c ushr 8) and 255
+                        val b = (c ushr 16) and 255
+                        if (b > 55 && b > r * 1.18 && b > g * 1.04 && r < 145 && g < 170) birdRows[sy]++
+                    }
+                }
+                var bestR0 = -1; var bestR1 = -1; var bestRCount = 0
+                var r0 = -1; var rc = 0; var gapRows = 0
+                for (sy in 0..sampleH) {
+                    val on = sy < sampleH && birdRows[sy] >= 2
+                    if (on) { if (r0 < 0) r0 = sy; rc += birdRows[sy]; gapRows = 0 }
+                    else if (r0 >= 0) {
+                        gapRows++
+                        if (gapRows > 3 || sy >= sampleH) {
+                            val r1 = sy - gapRows
+                            if (rc > bestRCount) { bestRCount = rc; bestR0 = r0; bestR1 = r1 }
+                            r0 = -1; rc = 0; gapRows = 0
+                        }
+                    }
+                }
+                if (bestR0 >= 0) {
+                    birdW = ((bestC1 - bestC0) * step).toDouble()
+                    birdH = ((bestR1 - bestR0) * step).toDouble()
+                    if (birdW >= 12 && birdH >= 18) {
+                        birdFound = true
+                        birdX = (bestC0 + bestC1) * step / 2.0
+                        birdY = (bestR0 + bestR1) * step / 2.0
+                    }
+                }
             }
         }
 
@@ -141,25 +189,11 @@ class FrameAnalyzer {
             }
         }
 
-        val maxExt = (w * 0.065).toInt().coerceAtLeast(step)
-        val weak = max(2, (sampleH * 0.0035).toInt())
         val pipes = ArrayList<RawPipe>(groups.size)
         for (grp in groups) {
-            // extend over crystal caps
-            var left = grp[0]
-            var ext = 0
-            while (left - step >= 0 && ext < maxExt) {
-                val idx = ((left - step) / step).coerceIn(0, sampleW - 1)
-                if (colPurple[idx] + colCrystal[idx] < weak) break
-                left -= step; ext += step
-            }
-            var right = grp[1]
-            ext = 0
-            while (right < w && ext < maxExt) {
-                val idx = (right / step).coerceIn(0, sampleW - 1)
-                if (colPurple[idx] + colCrystal[idx] < weak) break
-                right = min(right + step, w); ext += step
-            }
+            // caps are as wide as the stone body: only a tiny safety margin for the sampling grid
+            val left = max(0, grp[0] - step)
+            val right = min(w, grp[1] + step)
             val gap = findGap(px, stridePx, top, h, sampleH, step, grp[0], grp[1], w) ?: continue
             pipes.add(RawPipe(left.toDouble(), right.toDouble(), gap[0].toDouble(), gap[1].toDouble()))
         }
@@ -169,12 +203,20 @@ class FrameAnalyzer {
         )
     }
 
-    /** Opening (top, bottom) inside one pipe column group, or null when it cannot be confirmed. */
+    private var tip = BooleanArray(0)
+
+    /**
+     * Opening (top, bottom) inside one pipe column group, or null when it cannot be confirmed.
+     * 1) stone body rows (purple, >=3 of 9 samples) give a first gap;
+     * 2) the red crystal tip that hangs into the gap is added ONLY while it stays connected to the body
+     *    (<=3 empty sampled rows) - so a floating bonus crystal or a potion in the gap is not a wall.
+     */
     private fun findGap(
         px: IntBuffer, stridePx: Int, top: Int, h: Int, sampleH: Int, step: Int,
         gx0: Int, gx1: Int, w: Int
     ): IntArray? {
         val xs = IntArray(9) { i -> (gx0 + (gx1 - gx0) * (0.02 + i * 0.12)).toInt().coerceIn(0, w - 1) }
+        if (tip.size < sampleH) tip = BooleanArray(sampleH)
         for (sy in 0 until sampleH) {
             val rowBase = (top + sy * step) * stridePx
             var purple = 0
@@ -185,11 +227,12 @@ class FrameAnalyzer {
                 val g = (c ushr 8) and 255
                 val b = (c ushr 16) and 255
                 if (isPurple(r, g, b)) purple++
-                if (isCrystal(r, g, b)) crystal++
+                else if (isCrystal(r, g, b)) crystal++
             }
-            vertical[sy] = purple >= 3 || crystal >= 3
+            vertical[sy] = purple >= 3
+            tip[sy] = crystal >= 1 && purple < 3
         }
-        // runs of wall rows, merging texture breaks
+        // runs of stone rows, merging texture breaks (moss, cracks)
         val minRun = h * 0.025
         val mergeTol = max(step * 2, (h * 0.025).toInt())
         val runs = ArrayList<IntArray>(4)
@@ -210,19 +253,42 @@ class FrameAnalyzer {
         }
         if (runs.size < 2) return null
         var best = 0
-        var gt = -1
-        var gb = -1
+        var bi = -1
         for (i in 0 until runs.size - 1) {
             val gap = runs[i + 1][0] - runs[i][1]
-            if (gap > best) { best = gap; gt = runs[i][1]; gb = runs[i + 1][0] }
+            if (gap > best) { best = gap; bi = i }
         }
-        if (best < h * 0.08 || best > h * 0.62) return null
+        if (bi < 0) return null
+        var gt = runs[bi][1]
+        var gb = runs[bi + 1][0]
+        // crystal tip hanging down from the upper stone
+        var i = gt / step
+        var last = i - 1
+        var miss = 0
+        val limDown = gb / step
+        while (i < limDown) {
+            if (tip[i]) { last = i; miss = 0 } else if (++miss > 3) break
+            i++
+        }
+        gt = max(gt, (last + 1) * step)
+        // crystal tip growing up from the lower stone
+        i = gb / step - 1
+        last = i + 1
+        miss = 0
+        val limUp = gt / step
+        while (i >= limUp) {
+            if (tip[i]) { last = i; miss = 0 } else if (++miss > 3) break
+            i--
+        }
+        gb = min(gb, last * step)
+        val gap = gb - gt
+        if (gap < h * 0.08 || gap > h * 0.62) return null
         return intArrayOf(gt, gb)
     }
 
     private fun isPurple(r: Int, g: Int, b: Int) =
         r in 48..190 && b in 48..195 && g < 115 && r > g * 1.18 && b > g * 1.18
 
-    private fun isCrystal(r: Int, g: Int, b: Int) =
-        r >= 125 && g in 28..190 && b <= 150 && r > g * 1.12 && r > b * 1.18
+    // Crystals are saturated red -> orange -> pale orange: (150,8,20) (203,22,5) (232,85,34) (252,158,97)
+    private fun isCrystal(r: Int, g: Int, b: Int) = r >= 130 && r > g * 1.35 && r > b * 1.5
 }

@@ -48,6 +48,7 @@ class GameAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        connected = true
         screenStatus = "Служба подключена • включи захват экрана и панель"
         appendRunLog("SERVICE_CONNECTED version=${BuildConfigVersion.NAME}")
     }
@@ -68,7 +69,9 @@ class GameAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        connected = false
         monitoring = false
+        statPlaying = false
         flushLog()
         super.onDestroy()
     }
@@ -81,6 +84,7 @@ class GameAccessibilityService : AccessibilityService() {
         logStart = System.currentTimeMillis()
         autoTapCount = 0
         tapCancelled = 0
+        statAttempt = 0; statPassed = 0; statLastResult = ""; statPlaying = false
         paused = false
         manual = false
         monitoring = true
@@ -123,11 +127,12 @@ class GameAccessibilityService : AccessibilityService() {
         var pl = pilot
         if (pl == null || pilotW != sw || pilotH != fieldH) {
             pl?.let { savePhysics(it) }
-            pl = AutoPilot(sw, fieldH, loadPhysics())
+            val hit = loadHitScale(this)
+            pl = AutoPilot(sw, fieldH, loadPhysics(), hit, hit)
             pilot = pl
             pilotW = sw
             pilotH = fieldH
-            appendRunLog("PILOT_CREATED field=${sw}x$fieldH priors=${if (loadPhysics() != null) "SAVED" else "DEFAULT"}")
+            appendRunLog("PILOT_CREATED field=${sw}x$fieldH hitScale=${"%.2f".format(hit)} priors=${if (loadPhysics() != null) "SAVED" else "DEFAULT"}")
         }
 
         val scene = analyzer.analyze(pixels, stridePx, sw, sh, cropTop)
@@ -135,9 +140,18 @@ class GameAccessibilityService : AccessibilityService() {
         val tNowMs = tAnalyzed / 1e6
         val (decision, event) = pl.onScene(tCapMs, tNowMs, scene)
 
+        analyzer.birdHintX = pl.birdXHint
+        analyzer.birdHintW = pl.birdWHint
+        statPlaying = scene.active
+        statAttempt = pl.attempt
+        statPassed = pl.passed
+        statLatency = pl.latency
         if (event != null) {
             appendRunLog(event)
-            if (event.startsWith("ATTEMPT_END")) { savePhysics(pl); flushLog() }
+            if (event.startsWith("ATTEMPT_END")) {
+                statLastResult = "${pl.passed} труб за ${"%.0f".format((tNowMs - pl.attemptStartMs) / 1000.0)} с"
+                savePhysics(pl); flushLog()
+            }
         }
         val first = scene.pipes.firstOrNull { it.right > scene.birdX }
         publishScene(scene.birdX, scene.birdY, first?.left, first?.top, first?.bottom)
@@ -163,6 +177,8 @@ class GameAccessibilityService : AccessibilityService() {
         perfAgeMs += tNowMs - tCapMs
         if (tNowMs - lastPerfMs >= 2000.0) {
             if (lastPerfMs > 0.0 && perfFrames > 0) {
+                statFps = perfFrames * 1000.0 / (tNowMs - lastPerfMs)
+                statAgeMs = perfAgeMs / perfFrames
                 appendRunLog(
                     "PERF fps=${"%.1f".format(perfFrames * 1000.0 / (tNowMs - lastPerfMs))} " +
                         "analyzeMs=${"%.1f".format(perfAnalyzeNs / 1e6 / perfFrames)} ageMs=${"%.0f".format(perfAgeMs / perfFrames)} " +
@@ -280,6 +296,32 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var lastGapBottom = -1
         @Volatile var lastTapStatus = "TAP —"
 
+        /** True while the accessibility service is connected. */
+        @Volatile var connected = false
+            private set
+        /** Set by MediaProjectionCaptureService while frames are flowing. */
+        @Volatile var captureActive = false
+        // live numbers for the overlay panel
+        @Volatile var statPlaying = false
+        @Volatile var statAttempt = 0
+        @Volatile var statPassed = 0
+        @Volatile var statFps = 0.0
+        @Volatile var statAgeMs = 0.0
+        @Volatile var statLatency = 0.0
+        @Volatile var statLastResult = ""
+
+        private const val SETTINGS = "bird_play_settings"
+        const val DEFAULT_HIT_SCALE = 1.3
+
+        fun loadHitScale(ctx: Context): Double = try {
+            (ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).getString("hitScale", null)?.toDouble()
+                ?: DEFAULT_HIT_SCALE).coerceIn(1.0, 2.0)
+        } catch (_: Exception) { DEFAULT_HIT_SCALE }
+
+        fun saveHitScale(ctx: Context, v: Double) {
+            try { ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).edit().putString("hitScale", v.toString()).apply() } catch (_: Exception) {}
+        }
+
         private const val HEADER_CROP_FRACTION = 0.117
         private const val TAP_X_FRACTION = 0.78f
         private const val TAP_Y_FRACTION = 0.52f
@@ -327,5 +369,5 @@ class GameAccessibilityService : AccessibilityService() {
 
 /** Single place for the human-readable version used in logs (keep in sync with build.gradle.kts). */
 internal object BuildConfigVersion {
-    const val NAME = "0.50.0"
+    const val NAME = "0.51.0"
 }

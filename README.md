@@ -3,7 +3,7 @@
 > **Article ID:** BRD-001  
 > **Author:** ChatGPT (OpenAI)  
 > **Document status:** Maintained project index  
-> **Current app version:** 0.50.0 (versionCode 57) — controller rewritten, see [docs/REWRITE_0.50.md](docs/REWRITE_0.50.md)
+> **Current app version:** 0.51.0 (versionCode 58) — controller rewritten, see [docs/REWRITE_0.50.md](docs/REWRITE_0.50.md)
 
 Bird Play is an Android prototype that observes a Flappy-style game through screen capture, detects the bird and pipe gaps, predicts the bird's vertical trajectory, and sends touch gestures through Android Accessibility. The objective is to pass as many pipe pairs as possible while keeping the game visible and allowing immediate manual takeover.
 

@@ -101,6 +101,7 @@ class MediaProjectionCaptureService : Service() {
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader?.surface, null, workerHandler
             )
+            GameAccessibilityService.captureActive = true
             GameAccessibilityService.screenStatus = "MediaProjection готов • ожидаю запуск игры"
         } catch (e: Exception) {
             GameAccessibilityService.screenStatus = "Не удалось запустить захват: ${e.javaClass.simpleName}"
@@ -117,6 +118,7 @@ class MediaProjectionCaptureService : Service() {
     }
 
     override fun onDestroy() {
+        GameAccessibilityService.captureActive = false
         imageReader?.setOnImageAvailableListener(null, null)
         virtualDisplay?.release()
         imageReader?.close()
