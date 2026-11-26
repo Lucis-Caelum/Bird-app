@@ -261,6 +261,7 @@ class FrameAnalyzer {
         if (bi < 0) return null
         var gt = runs[bi][1]
         var gb = runs[bi + 1][0]
+        val stoneB = gb
         // crystal tip hanging down from the upper stone
         var i = gt / step
         var last = i - 1
@@ -281,10 +282,23 @@ class FrameAnalyzer {
             i--
         }
         gb = min(gb, last * step)
+        // The crystals have a FIXED size in the game (measured on a real screenshot): tip of the upper pipe hangs
+        // 8.5% of the field below its stone body, the lower one reaches 5.8% above its stone. Dark/animated crystals
+        // are sometimes missed by colour, so never let the opening be wider than the geometry allows.
+        // The crystals have a FIXED size in the game (measured on a real screenshot). Dark or animated crystals are
+        // sometimes missed by colour, which made the opening look 700-800 px instead of ~540. So:
+        // 1) the lower tip can never be lower than 5.8% of the field above the lower stone body;
+        // 2) the opening has a constant height (22% of the field): if it comes out wider, the upper tip was missed.
+        gb = min(gb, stoneB - (TIP_DOWN * h).toInt())
+        if (gb - gt > GAP_WIDE * h) gt = gb - (GAP_EXPECT * h).toInt()
         val gap = gb - gt
         if (gap < h * 0.08 || gap > h * 0.62) return null
         return intArrayOf(gt, gb)
     }
+
+    private val TIP_DOWN = 0.058
+    private val GAP_EXPECT = 0.222
+    private val GAP_WIDE = 0.236
 
     private fun isPurple(r: Int, g: Int, b: Int) =
         r in 48..190 && b in 48..195 && g < 115 && r > g * 1.18 && b > g * 1.18

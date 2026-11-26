@@ -111,7 +111,8 @@ class AutoPilot(
             if (birdWs.size < 5 || scene.birdH >= 0.72 * medianOf(birdHs)) {
                 push(birdWs, scene.birdW); push(birdHs, scene.birdH)
             }
-            bird.add(tCap, scene.birdY)
+            val bhNow = if (birdHs.size >= 3) medianOf(birdHs) else scene.birdH
+            bird.add(tCap, scene.birdY + SPRITE_DY * bhNow)
         }
         val bxm = medianOf(birdXs)
         val bwm = medianOf(birdWs)
@@ -127,12 +128,14 @@ class AutoPilot(
         val bx = medianOf(birdXs)
         val bw = max(medianOf(birdWs), 0.03 * W)
         val bh = max(medianOf(birdHs), 0.03 * H)
-        val halfW = 0.5 * bw * hitScaleW
-        val halfH = 0.5 * bh * hitScaleH
-        val ctl = Controller(W, H, bx - halfW, bx + halfW, halfH)
+        // The detector sees only the blue hoodie; the real sprite (head, rocket, flame) is bigger and offset.
+        val halfW = SPRITE_HALF_W * bw * hitScaleW
+        val halfH = SPRITE_HALF_H * bh * hitScaleH
+        val bxs = bx + SPRITE_DX * bw
+        val ctl = Controller(W, H, bxs - halfW, bxs + halfW, halfH)
         // margin to the pipe the bird is level with (negative = touching)
         for (p in obs) {
-            if (p.left <= bx + halfW && p.right >= bx - halfW) {
+            if (p.left <= bxs + halfW && p.right >= bxs - halfW) {
                 val mt = (ye - halfH) - p.top
                 val mb = p.bottom - (ye + halfH)
                 margins.add(if (mt < mb) Margin(tCap, mt, "TOP", ye, p.top, p.bottom) else Margin(tCap, mb, "BOTTOM", ye, p.top, p.bottom))
@@ -148,7 +151,7 @@ class AutoPilot(
         }
         val lastDisp = if (taps.isNotEmpty()) taps.last() - tCap else null
         val age = min(250.0, max(3.0, tNow - tCap))
-        val vis = obs.filter { it.right > bx - halfW - 60.0 }
+        val vis = obs.filter { it.right > bxs - halfW - 60.0 }
         val plan = ctl.decide(ye, ve, age, vis, pipes.speed, phys, pending, lastDisp)
         if (plan.tap) {
             taps.add(tNow)
@@ -171,8 +174,14 @@ class AutoPilot(
         const val DEFAULT_G_PER_H = 5.0e-6
         const val DEFAULT_VF_PER_H = -7.5e-4
         const val DEFAULT_L = 90.0
-        const val DEFAULT_HIT_SCALE_W = 1.0
-        const val DEFAULT_HIT_SCALE_H = 1.0
+        const val DEFAULT_HIT_SCALE_W = 0.55
+        const val DEFAULT_HIT_SCALE_H = 0.55
+        // Real sprite vs detected hoodie box (measured on a screenshot, units of hoodie box size):
+        // hair is 1.04*bh above the hoodie centre, shoes 0.68*bh below, flame 1.46*bw left, nose 1.02*bw right.
+        const val SPRITE_DY = -0.18
+        const val SPRITE_HALF_H = 0.86
+        const val SPRITE_DX = -0.22
+        const val SPRITE_HALF_W = 1.24
         const val DEFAULT_SPEED_PER_W = 0.0006
     }
 }

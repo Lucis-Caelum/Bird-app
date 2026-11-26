@@ -121,21 +121,21 @@ class MainActivity : Activity() {
         val card = UiKit.card(this)
         card.addView(UiKit.text(this, "Размер хитбокса птицы", 15f, UiKit.TEXT, true))
         val value = UiKit.text(this, "", 13f, UiKit.ACCENT)
-        card.addView(UiKit.text(this, "Птица на экране больше своего «тела». Если автопилот часто задевает кончики кристаллов — увеличь; если не пролезает в узкие проходы — уменьши. Смотри в журнале строку «nearEdge» у завершённых попыток.", 12f, UiKit.TEXT_DIM).apply {
+        card.addView(UiKit.text(this, "Доля от реального спрайта (голова, ракета). Если задевает кристаллы — увеличь; если «не пролезает» в проход — уменьши. Смотри в журнале строку «nearEdge» у завершённых попыток.", 12f, UiKit.TEXT_DIM).apply {
             setPadding(0, dp(2), 0, dp(6))
         })
         card.addView(value)
         val bar = SeekBar(this).apply {
-            max = 100 // 60%..160%
-            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 60).toInt().coerceIn(0, 100)
+            max = 65 // 35%..100%
+            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 35).toInt().coerceIn(0, 65)
         }
-        fun show() { value.text = "${60 + bar.progress}%" + if (bar.progress == 40) "  (по умолчанию)" else "" }
+        fun show() { value.text = "${35 + bar.progress}%" + if (bar.progress == 20) "  (по умолчанию)" else "" }
         show()
         bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { show() }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {
-                GameAccessibilityService.saveHitScale(this@MainActivity, (60 + bar.progress) / 100.0)
+                GameAccessibilityService.saveHitScale(this@MainActivity, (35 + bar.progress) / 100.0)
                 Toast.makeText(this@MainActivity, "Применится при следующем запуске автопилота", Toast.LENGTH_SHORT).show()
             }
         })
