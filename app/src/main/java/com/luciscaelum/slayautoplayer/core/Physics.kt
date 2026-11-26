@@ -216,7 +216,9 @@ class Calibrator(private val phys: Physics) {
                 cnt++
             }
         }
-        if (cnt < 14 || ts[0] > td0 - 120.0) {
+        var pre = 0
+        for (i in 0 until cnt) if (ts[i] < td0) pre++
+        if (cnt < 14 || pre < 3) {
             lastCalTd = td1
             return
         }

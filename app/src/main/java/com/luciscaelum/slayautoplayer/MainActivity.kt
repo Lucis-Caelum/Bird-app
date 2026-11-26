@@ -126,16 +126,16 @@ class MainActivity : Activity() {
         })
         card.addView(value)
         val bar = SeekBar(this).apply {
-            max = 100 // 100%..200%
-            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 100).toInt().coerceIn(0, 100)
+            max = 100 // 60%..160%
+            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 60).toInt().coerceIn(0, 100)
         }
-        fun show() { value.text = "${100 + bar.progress}%" + if (bar.progress == 30) "  (по умолчанию)" else "" }
+        fun show() { value.text = "${60 + bar.progress}%" + if (bar.progress == 40) "  (по умолчанию)" else "" }
         show()
         bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { show() }
             override fun onStartTrackingTouch(s: SeekBar?) {}
             override fun onStopTrackingTouch(s: SeekBar?) {
-                GameAccessibilityService.saveHitScale(this@MainActivity, (100 + bar.progress) / 100.0)
+                GameAccessibilityService.saveHitScale(this@MainActivity, (60 + bar.progress) / 100.0)
                 Toast.makeText(this@MainActivity, "Применится при следующем запуске автопилота", Toast.LENGTH_SHORT).show()
             }
         })

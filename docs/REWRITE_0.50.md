@@ -42,3 +42,7 @@ Checked the detector against a real screenshot of the game (1158x2576):
 - **UI**: new main screen with setup status, hit-box slider, compact floating panel (state, attempt, pipes, fps/latency), log screen with attempt summary and copy button.
 
 Simulator (realistic proportions: bird ~8–11% of field height, gap ~22%): with learned/saved physics 40/40 and 33/40 full 40-pipe runs for hit boxes 180/240 px; first-ever attempt with wrong priors 34/40 and 23/40. Rendered-frame end-to-end: 10/12.
+
+## 0.52.0 — ранняя гибель у первой трубы
+Причина по журналу 0.51.0: хитбокс ×1.3 и большие запасы оставляли в щели полосу уже, чем высота прыжка (~250 px) — план был невыполним. Также первая калибровка задержки тапа пропускалась.
+Изменения: хитбокс по умолчанию 100% (слайдер 60–160%, новый ключ настроек), запасы 3% + 5 px у труб, +7% снизу, запасной режим «в середину» при невыполнимом плане, калибровка задержки уже по первому тапу.

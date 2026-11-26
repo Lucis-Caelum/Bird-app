@@ -171,8 +171,8 @@ class AutoPilot(
         const val DEFAULT_G_PER_H = 5.0e-6
         const val DEFAULT_VF_PER_H = -7.5e-4
         const val DEFAULT_L = 90.0
-        const val DEFAULT_HIT_SCALE_W = 1.3
-        const val DEFAULT_HIT_SCALE_H = 1.3
+        const val DEFAULT_HIT_SCALE_W = 1.0
+        const val DEFAULT_HIT_SCALE_H = 1.0
         const val DEFAULT_SPEED_PER_W = 0.0006
     }
 }

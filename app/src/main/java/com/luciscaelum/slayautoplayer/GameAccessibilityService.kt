@@ -311,15 +311,15 @@ class GameAccessibilityService : AccessibilityService() {
         @Volatile var statLastResult = ""
 
         private const val SETTINGS = "bird_play_settings"
-        const val DEFAULT_HIT_SCALE = 1.3
+        const val DEFAULT_HIT_SCALE = 1.0
 
         fun loadHitScale(ctx: Context): Double = try {
-            (ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).getString("hitScale", null)?.toDouble()
-                ?: DEFAULT_HIT_SCALE).coerceIn(1.0, 2.0)
+            (ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).getString("hitScale2", null)?.toDouble()
+                ?: DEFAULT_HIT_SCALE).coerceIn(0.6, 1.6)
         } catch (_: Exception) { DEFAULT_HIT_SCALE }
 
         fun saveHitScale(ctx: Context, v: Double) {
-            try { ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).edit().putString("hitScale", v.toString()).apply() } catch (_: Exception) {}
+            try { ctx.getSharedPreferences(SETTINGS, Context.MODE_PRIVATE).edit().putString("hitScale2", v.toString()).apply() } catch (_: Exception) {}
         }
 
         private const val HEADER_CROP_FRACTION = 0.117
@@ -369,5 +369,5 @@ class GameAccessibilityService : AccessibilityService() {
 
 /** Single place for the human-readable version used in logs (keep in sync with build.gradle.kts). */
 internal object BuildConfigVersion {
-    const val NAME = "0.51.0"
+    const val NAME = "0.52.0"
 }

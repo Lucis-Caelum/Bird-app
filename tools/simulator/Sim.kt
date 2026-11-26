@@ -44,6 +44,7 @@ private class SPipe(var left: Double, val top: Double, val bottom: Double, val i
 private class Track { val tops = ArrayList<Double>(); val bots = ArrayList<Double>() }
 private class Pend(val tDec: Double, val ts: Double, val y: Double, val obs: List<PipeObs>)
 
+val TRACE = System.getenv("SIM_TRACE") != null
 class SimResult(val passed: Int, val death: String, val taps: Int, val time: Double)
 
 fun runSim(seed: Long, c: SimCfg): SimResult {
@@ -152,6 +153,7 @@ fun runSim(seed: Long, c: SimCfg): SimResult {
         val speed = c.speed * (1 + rng.nextGaussian() * 0.03)
         val vis = p.obs.filter { it.right > bx - bhw - 60 }
         val plan = ctl.decide(est[0], est[1], age, vis, speed, phys, pending, lastDisp)
+        if (TRACE && pipes.isNotEmpty() && t < 6000 && (plan.tap || (p.ts.toInt() % 100 < 17))) { val q = pipes.firstOrNull { it.left + c.pipeW > bx - bhw }; println("t=%.0f y=%.0f v=%.2f est=%.0f/%.2f %s sw=%.0f st=%.0f g=%.4f vf=%.2f L=%.0f pipeL=%.0f gap=%.0f..%.0f".format(t, y, v, est[0], est[1], if (plan.tap) "TAP " + plan.reason else plan.reason, plan.scoreWait, plan.scoreTap, phys.g, phys.vf, phys.L, (q?.left ?: 0.0) - bx, q?.top ?: 0.0, q?.bottom ?: 0.0)) }
         if (plan.tap) {
             taps.add(t)
             cal.noteTap(t)
@@ -165,6 +167,7 @@ fun runSim(seed: Long, c: SimCfg): SimResult {
 
 fun main(args: Array<String>) {
     System.getenv("BOT_EXTRA")?.let { BOT_EXTRA = it.toDouble() }
+    System.getenv("PIPE_M")?.let { PIPE_M = it.toDouble() }
     if (args.isNotEmpty() && args[0] == "renderseed") { val r = runRender(args[1].toLong(), args[2].toInt()); println("RESULT passed=${r.passed} death=${r.death}"); return }
     if (args.isNotEmpty() && args[0] == "render") { mainRender(args.drop(1).toTypedArray()); return }
     val n = if (args.isNotEmpty()) args[0].toInt() else 40
@@ -174,7 +177,7 @@ fun main(args: Array<String>) {
     var early = 0
     val t0 = System.currentTimeMillis()
     for (s in 0 until n) {
-        val r = runSim(s.toLong(), SimCfg(g = (System.getenv("SIM_G") ?: "0.017").toDouble(), bhh = (System.getenv("SIM_BHH") ?: "160").toDouble(), bhw = (System.getenv("SIM_BHW") ?: "94").toDouble(), gErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.6 to 1.6, vfErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.7 to 1.4, L0 = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0, maxPipes = (System.getenv("SIM_PIPES") ?: "40").toInt()))
+        val r = runSim(s.toLong(), SimCfg(g = (System.getenv("SIM_G") ?: "0.017").toDouble(), bhh = (System.getenv("SIM_BHH") ?: "160").toDouble(), vf = (System.getenv("SIM_VF") ?: "-2.4").toDouble(), L = (System.getenv("SIM_L") ?: "110").toDouble(), gapH = (System.getenv("SIM_GAP") ?: "616").toDouble(), gapVar = (System.getenv("SIM_GAPVAR") ?: "40").toDouble(), bhw = (System.getenv("SIM_BHW") ?: "94").toDouble(), gErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.6 to 1.6, vfErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.7 to 1.4, L0 = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0, maxPipes = (System.getenv("SIM_PIPES") ?: "40").toInt()))
         res.add(r.passed)
         deaths.merge(r.death, 1, Int::plus)
         if (r.passed >= 40) full++
