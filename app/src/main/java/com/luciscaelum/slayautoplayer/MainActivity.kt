@@ -126,10 +126,10 @@ class MainActivity : Activity() {
         })
         card.addView(value)
         val bar = SeekBar(this).apply {
-            max = 65 // 35%..100%
-            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 35).toInt().coerceIn(0, 65)
+            max = 85 // 35%..120%
+            progress = (GameAccessibilityService.loadHitScale(this@MainActivity) * 100 - 35).toInt().coerceIn(0, 85)
         }
-        fun show() { value.text = "${35 + bar.progress}%" + if (bar.progress == 20) "  (по умолчанию)" else "" }
+        fun show() { value.text = "${35 + bar.progress}%" + if (bar.progress == 50) "  (по умолчанию)" else "" }
         show()
         bar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) { show() }

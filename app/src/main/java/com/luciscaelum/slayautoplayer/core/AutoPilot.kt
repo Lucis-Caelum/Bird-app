@@ -66,6 +66,10 @@ class AutoPilot(
     // closest approach to a pipe edge during the last 2 s, to explain deaths in the log
     private class Margin(val t: Double, val v: Double, val side: String, val y: Double, val gt: Double, val gb: Double)
     private val margins = ArrayList<Margin>()
+    private var inOverlap = false
+    private var curMinT = 1e9
+    private var curMinB = 1e9
+    private var curGap = 0.0
 
     fun exportPhysics(): SavedPhysics? {
         if (phys.flapSampleCount < 1 || phys.gSampleCount < 1) return null
@@ -100,7 +104,7 @@ class AutoPilot(
             pipes.reset()
             cal.resetAttempt()
             taps.clear()
-            birdXs.clear(); birdWs.clear(); birdHs.clear(); margins.clear()
+            birdXs.clear(); birdWs.clear(); birdHs.clear(); margins.clear(); inOverlap = false
             event = "ATTEMPT_START attempt=$attempt g=${"%.5f".format(phys.g)} vf=${"%.3f".format(phys.vf)} " +
                 "L=${phys.L.toInt()} speed=${"%.3f".format(pipes.speed)} field=${fieldW}x$fieldH"
         }
@@ -112,7 +116,7 @@ class AutoPilot(
                 push(birdWs, scene.birdW); push(birdHs, scene.birdH)
             }
             val bhNow = if (birdHs.size >= 3) medianOf(birdHs) else scene.birdH
-            bird.add(tCap, scene.birdY + SPRITE_DY * bhNow)
+            bird.add(tCap, scene.birdY + 0.5 * (HIT_DOWN - HIT_UP) * hitScaleH * bhNow)
         }
         val bxm = medianOf(birdXs)
         val bwm = medianOf(birdWs)
@@ -130,19 +134,28 @@ class AutoPilot(
         val bh = max(medianOf(birdHs), 0.03 * H)
         // The detector sees only the blue hoodie; the real sprite (head, rocket, flame) is bigger and offset.
         val halfW = SPRITE_HALF_W * bw * hitScaleW
-        val halfH = SPRITE_HALF_H * bh * hitScaleH
+        val halfH = 0.5 * (HIT_UP + HIT_DOWN) * bh * hitScaleH
         val bxs = bx + SPRITE_DX * bw
         val ctl = Controller(W, H, bxs - halfW, bxs + halfW, halfH)
         // margin to the pipe the bird is level with (negative = touching)
+        var overl = false
         for (p in obs) {
             if (p.left <= bxs + halfW && p.right >= bxs - halfW) {
                 val mt = (ye - halfH) - p.top
                 val mb = p.bottom - (ye + halfH)
+                if (!inOverlap) { curMinT = 1e9; curMinB = 1e9 }
+                curMinT = min(curMinT, mt); curMinB = min(curMinB, mb); curGap = p.bottom - p.top
+                overl = true
                 margins.add(if (mt < mb) Margin(tCap, mt, "TOP", ye, p.top, p.bottom) else Margin(tCap, mb, "BOTTOM", ye, p.top, p.bottom))
                 break
             }
         }
         while (margins.isNotEmpty() && tCap - margins[0].t > 2000.0) margins.removeAt(0)
+        if (!overl && inOverlap) {
+            val ln = "PASS pipe=${pipes.passedCount} minTopMargin=${curMinT.toInt()} minBotMargin=${curMinB.toInt()} gap=${curGap.toInt()} halfH=${halfH.toInt()}"
+            event = if (event == null) ln else event + "\n" + ln
+        }
+        inOverlap = overl
 
         val pending = ArrayList<Double>(4)
         for (i in max(0, taps.size - 4) until taps.size) {
@@ -174,14 +187,16 @@ class AutoPilot(
         const val DEFAULT_G_PER_H = 5.0e-6
         const val DEFAULT_VF_PER_H = -7.5e-4
         const val DEFAULT_L = 90.0
-        const val DEFAULT_HIT_SCALE_W = 0.55
-        const val DEFAULT_HIT_SCALE_H = 0.55
+        const val DEFAULT_HIT_SCALE_W = 0.8
+        const val DEFAULT_HIT_SCALE_H = 0.85
         // Real sprite vs detected hoodie box (measured on a screenshot, units of hoodie box size):
         // hair is 1.04*bh above the hoodie centre, shoes 0.68*bh below, flame 1.46*bw left, nose 1.02*bw right.
-        const val SPRITE_DY = -0.18
-        const val SPRITE_HALF_H = 0.86
+        // Hit zone relative to the hoodie box centre (units of hoodie height bh), before the user scale:
+        // up to the hair (head hits the upper crystal), but only a short way down (deaths on the lower side never seen).
+        const val HIT_UP = 1.04
+        const val HIT_DOWN = 0.36
         const val SPRITE_DX = -0.22
-        const val SPRITE_HALF_W = 1.24
+        const val SPRITE_HALF_W = 0.95
         const val DEFAULT_SPEED_PER_W = 0.0006
     }
 }

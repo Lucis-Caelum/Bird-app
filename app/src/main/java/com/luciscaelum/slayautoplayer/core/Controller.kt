@@ -9,7 +9,7 @@ const val MIN_TAP_GAP = 110.0
 const val BIAS = 0.38
 
 /** Extra safety (fraction of gap height) kept above the lower pipe: falling errors are the expensive ones. */
-var BOT_EXTRA = 0.07
+var BOT_EXTRA = 0.04
 
 /** Side margin as a fraction of the gap height. */
 var PIPE_M = 0.03
