@@ -33,13 +33,13 @@ class AutoPilot(
     private val H = fieldH.toDouble()
 
     private val phys = Physics(
-        g0 = saved?.gPerH?.times(H) ?: DEFAULT_G_PER_H * H,
-        vf0 = saved?.vfPerH?.times(H) ?: DEFAULT_VF_PER_H * H,
+        g0 = DEFAULT_G_PER_H * H, // game constants measured on video: do not trust old saved values
+        vf0 = DEFAULT_VF_PER_H * H,
         L0 = saved?.latencyMs ?: DEFAULT_L
     )
     private val bird = BirdTracker()
     private val cal = Calibrator(phys)
-    private val pipes = PipeTracker(W, saved?.speedPerW?.times(W) ?: DEFAULT_SPEED_PER_W * W)
+    private val pipes = PipeTracker(W, DEFAULT_SPEED_PER_W * W)
 
     private val taps = ArrayList<Double>() // dispatch times of the current attempt
     private val birdXs = ArrayList<Double>()
@@ -184,19 +184,21 @@ class AutoPilot(
     companion object {
         // Ballpark values from the v0.43 logs (field height ~2300 px, flap speed ~ -1.9 px/ms).
         // They are only priors: the calibrator refines them online and the result is persisted.
-        const val DEFAULT_G_PER_H = 5.0e-6
-        const val DEFAULT_VF_PER_H = -7.5e-4
+        const val DEFAULT_G_PER_H = 2.58e-6
+        const val DEFAULT_VF_PER_H = -7.4e-4
         const val DEFAULT_L = 90.0
-        const val DEFAULT_HIT_SCALE_W = 0.8
-        const val DEFAULT_HIT_SCALE_H = 0.85
+        const val DEFAULT_HIT_SCALE_W = 1.0
+        const val DEFAULT_HIT_SCALE_H = 1.0
         // Real sprite vs detected hoodie box (measured on a screenshot, units of hoodie box size):
         // hair is 1.04*bh above the hoodie centre, shoes 0.68*bh below, flame 1.46*bw left, nose 1.02*bw right.
         // Hit zone relative to the hoodie box centre (units of hoodie height bh), before the user scale:
-        // up to the hair (head hits the upper crystal), but only a short way down (deaths on the lower side never seen).
-        const val HIT_UP = 1.04
-        const val HIT_DOWN = 0.36
+        // Measured on a screen recording of a human run: the head (hair top at 1.04*bh) touches the upper crystal fatally only right under
+        // the tip, while passes with the head 0.3*bh inside the sloping crystal were fine; the lower side is shorter still.
+        const val HIT_UP = 0.80
+        const val HIT_DOWN = 0.30
         const val SPRITE_DX = -0.22
         const val SPRITE_HALF_W = 0.95
-        const val DEFAULT_SPEED_PER_W = 0.0006
+        // measured on a screen recording (1080 px wide): pipes move 0.000884*W per ms (the old 0.0006 was 32% too slow)
+        const val DEFAULT_SPEED_PER_W = 0.00088
     }
 }

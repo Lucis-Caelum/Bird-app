@@ -25,14 +25,14 @@ class Physics(val g0: Double, val vf0: Double, val L0: Double) {
     val flapSampleCount: Int get() = lSamples.size
 
     fun addG(v: Double) {
-        if (!(v >= 0.2 * g0 && v <= 6.0 * g0)) return
+        if (!(v >= 0.8 * g0 && v <= 1.25 * g0)) return
         gSamples.add(v)
         while (gSamples.size > 15) gSamples.removeAt(0)
         g = medianOf(gSamples)
     }
 
     fun addFlap(vfNew: Double, lNew: Double) {
-        if (-vfNew >= 0.4 * abs(vf0) && -vfNew <= 2.5 * abs(vf0)) {
+        if (-vfNew >= 0.85 * abs(vf0) && -vfNew <= 1.18 * abs(vf0)) {
             vfSamples.add(vfNew)
             while (vfSamples.size > 9) vfSamples.removeAt(0)
             vf = medianOf(vfSamples)

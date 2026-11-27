@@ -20,12 +20,18 @@ class PipeTracker(private val fieldW: Double, priorSpeed: Double) {
         val width = ArrayList<Double>()
         val top = ArrayList<Double>()
         val bot = ArrayList<Double>()
+        // sparse history (>=20 ms apart) for the speed estimate: at 100+ fps the 7 dense samples span only ~60 ms
+        val gTop = ArrayList<Double>() // sparse, long history of the gap edges (they never move, so use all of it)
+        val gBot = ArrayList<Double>()
+        val st = ArrayList<Double>()
+        val sl = ArrayList<Double>()
         var lastT = 0.0
         var firstT = 0.0
         fun add(tm: Double, l: Double, w: Double, tp: Double, bt: Double) {
             if (t.isEmpty()) firstT = tm
             t.add(tm); left.add(l); width.add(w); top.add(tp); bot.add(bt)
             while (t.size > 7) { t.removeAt(0); left.removeAt(0); width.removeAt(0); top.removeAt(0); bot.removeAt(0) }
+            if (st.isEmpty() || tm - st.last() >= 20.0) { st.add(tm); sl.add(l); gTop.add(tp); gBot.add(bt); while (st.size > 40) { st.removeAt(0); sl.removeAt(0); gTop.removeAt(0); gBot.removeAt(0) } }
             lastT = tm
         }
     }
@@ -85,11 +91,11 @@ class PipeTracker(private val fieldW: Double, priorSpeed: Double) {
             for (i in 0 until n) lefts.add(tk.left[i] - speed * (tm - tk.t[i]))
             val l = medianOf(lefts)
             val w = medianOf(tk.width)
-            val mt = medianOf(tk.top)
-            val mb = medianOf(tk.bot)
+            val mt = medianOf(tk.gTop)
+            val mb = medianOf(tk.gBot)
             val dev = ArrayList<Double>(2 * n)
-            for (x in tk.top) dev.add(abs(x - mt))
-            for (x in tk.bot) dev.add(abs(x - mb))
+            for (x in tk.gTop) dev.add(abs(x - mt))
+            for (x in tk.gBot) dev.add(abs(x - mb))
             val spread = 1.5 * medianOf(dev)
             val conf = min(1.0, n / 3.0)
             out.add(PipeObs(l, l + w, mt, mb, conf, spread))
@@ -100,21 +106,20 @@ class PipeTracker(private val fieldW: Double, priorSpeed: Double) {
 
     private fun updateSpeed() {
         for (tk in tracks) {
-            val n = tk.t.size
-            if (n < 5 || tk.t[n - 1] - tk.t[0] < 250.0) continue
-            // least squares slope of left over time
-            var st = 0.0; var sl = 0.0
-            for (i in 0 until n) { st += tk.t[i]; sl += tk.left[i] }
-            val mt = st / n; val ml = sl / n
+            val n = tk.st.size
+            if (n < 8 || tk.st[n - 1] - tk.st[0] < 300.0) continue
+            var sT = 0.0; var sL = 0.0
+            for (i in 0 until n) { sT += tk.st[i]; sL += tk.sl[i] }
+            val mt = sT / n; val ml = sL / n
             var num = 0.0; var den = 0.0
-            for (i in 0 until n) { num += (tk.t[i] - mt) * (tk.left[i] - ml); den += (tk.t[i] - mt) * (tk.t[i] - mt) }
+            for (i in 0 until n) { num += (tk.st[i] - mt) * (tk.sl[i] - ml); den += (tk.st[i] - mt) * (tk.st[i] - mt) }
             if (den < 1.0) continue
             val s = -num / den
-            if (s in 0.0002 * fieldW..0.0025 * fieldW) {
+            if (s in 0.0006 * fieldW..0.0013 * fieldW) {
                 speedSamples.add(s)
                 while (speedSamples.size > 25) speedSamples.removeAt(0)
             }
         }
-        if (speedSamples.size >= 3) speed = medianOf(speedSamples)
+        if (speedSamples.size >= 5) speed = medianOf(speedSamples)
     }
 }

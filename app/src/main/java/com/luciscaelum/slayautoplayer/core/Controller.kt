@@ -212,7 +212,8 @@ class Controller(
                 plan.reason = "LINE"
             }
         } else {
-            if (plan.scoreTap + 1500.0 < plan.scoreWait) {
+            // never re-flap while the previous flap is still lifting the bird (v < -0.6 px/ms): it only pushes the head into the upper pipe
+            if (v > -0.6 && plan.scoreTap + 1500.0 < plan.scoreWait) {
                 plan.tap = true
                 plan.reason = "OVERRIDE"
             } else plan.reason = "WAIT"

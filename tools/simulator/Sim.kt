@@ -177,7 +177,7 @@ fun main(args: Array<String>) {
     var early = 0
     val t0 = System.currentTimeMillis()
     for (s in 0 until n) {
-        val r = runSim(s.toLong(), SimCfg(g = (System.getenv("SIM_G") ?: "0.017").toDouble(), bhh = (System.getenv("SIM_BHH") ?: "160").toDouble(), vf = (System.getenv("SIM_VF") ?: "-2.4").toDouble(), L = (System.getenv("SIM_L") ?: "110").toDouble(), gapH = (System.getenv("SIM_GAP") ?: "616").toDouble(), gapVar = (System.getenv("SIM_GAPVAR") ?: "40").toDouble(), bhw = (System.getenv("SIM_BHW") ?: "94").toDouble(), gErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.6 to 1.6, vfErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.7 to 1.4, L0 = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0, maxPipes = (System.getenv("SIM_PIPES") ?: "40").toInt()))
+        val r = runSim(s.toLong(), SimCfg(g = (System.getenv("SIM_G") ?: "0.017").toDouble(), bhh = (System.getenv("SIM_BHH") ?: "160").toDouble(), vf = (System.getenv("SIM_VF") ?: "-2.4").toDouble(), speed = (System.getenv("SIM_SPEED") ?: "0.85").toDouble(), spacing = (System.getenv("SIM_SPACING") ?: "1100").toDouble(), L = (System.getenv("SIM_L") ?: "110").toDouble(), gapH = (System.getenv("SIM_GAP") ?: "616").toDouble(), gapVar = (System.getenv("SIM_GAPVAR") ?: "40").toDouble(), bhw = (System.getenv("SIM_BHW") ?: "94").toDouble(), gErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.6 to 1.6, vfErr = if (System.getenv("SIM_GOOD") != null) 0.97 to 1.03 else 0.7 to 1.4, L0 = if (System.getenv("SIM_GOOD") != null) 108.0 else 90.0, maxPipes = (System.getenv("SIM_PIPES") ?: "40").toInt()))
         res.add(r.passed)
         deaths.merge(r.death, 1, Int::plus)
         if (r.passed >= 40) full++
